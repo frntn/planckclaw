@@ -9,6 +9,12 @@ set -e
 
 INTERACT_BRIDGE="${1:-./bridge_cli.sh}"
 
+# Prefix with ./ if no path separator (so "bridge_foo.sh" works like "./bridge_foo.sh")
+case "$INTERACT_BRIDGE" in
+    */*) ;;
+    *)   INTERACT_BRIDGE="./$INTERACT_BRIDGE" ;;
+esac
+
 if [ ! -x "$INTERACT_BRIDGE" ]; then
     echo "planckclaw: interact bridge '$INTERACT_BRIDGE' not found or not executable." >&2
     exit 1

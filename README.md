@@ -25,6 +25,17 @@ The entire runtime fits in ~23 KB. That's the binary, the bridges, the tools, th
 
 ***This is a thought experiment, not production-ready software.***
 
+## features
+
+- **Tool use**: the agent discovers available tools at each message and uses Claude's [tool_use](https://docs.anthropic.com/en/docs/build-with-claude/tool-use) protocol to call them. Ships with `get_time` and `system_status`.
+- **Hot-reload extensibility**: add a tool by dropping a shell script in `claws/`. No restart, no recompilation, no config file.
+- **Long-term memory**: conversation history persists across restarts in append-only JSONL.
+- **Automatic compaction**: when history grows past a threshold, old conversations are summarized by the LLM and stored as compressed context.
+- **Personality**: edit `memory/soul.md` to change who the agent is. Injected into every API call.
+- **Swappable bridges**: CLI, Discord, or write your own. Pass as argument to the launcher.
+- **Debug mode**: `PLANCKCLAW_DEBUG=1` dumps API payloads and HTTP status to stderr.
+- **Zero dependencies**: the agent binary is fully static. No libc, no allocator, no runtime.
+
 ## quick start
 
 Start with defaults : Anthropic LLM + CLI
@@ -40,10 +51,18 @@ cp config.env.example config.env     # add your Anthropic API key
 Extend using Discord bridge (require `jq` and `websocat`)
 
 ```sh
-./planckclaw.sh bridge_discord.sh    # defaults to bridge_discord.sh
+./planckclaw.sh bridge_discord.sh    # discuss via Discord (not CLI)
 ```
 
 You'll need `nasm`, `curl`, `jq`, and `websocat` installed (see [install](#install) below).
+
+<details>
+<summary>screenshots (Discord + server logs)</summary>
+<p>
+  <img src="demo/clientside-discord.png" alt="Discord conversation" width="420">
+  <img src="demo/serverside-planckclaw.png" alt="Server-side logs" width="420">
+</p>
+</details>
 
 ## what is this
 
@@ -162,6 +181,7 @@ Environment variables in `config.env`:
 | `PLANCKCLAW_DIR` | Memory directory | `./memory` |
 | `HISTORY_MAX` | Lines before compaction | `200` |
 | `HISTORY_KEEP` | Lines kept after compaction | `40` |
+| `PLANCKCLAW_DEBUG` | Enable debug logging (`1` = on) | `0` |
 
 ## install
 
