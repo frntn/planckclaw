@@ -1,5 +1,5 @@
 ASM      = nasm
-LDFLAGS  = -s -n
+LDFLAGS  = -s -N
 TARGET   = planckclaw
 
 all: $(TARGET)

@@ -1,6 +1,5 @@
-# PLANCKCLAW — Design Specification for Claude Code
+Super l# PLANCKCLAW — Design Specification for Claude Code
 # The smallest possible functional AI agent on Linux x86-64
-# NO CODE UNTIL YOU HAVE READ AND UNDERSTOOD THIS ENTIRE DOCUMENT.
 
 ================================================================================
 LEVEL 1 — CAPABILITIES

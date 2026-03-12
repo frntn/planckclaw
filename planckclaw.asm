@@ -16,6 +16,8 @@ default rel
 %define SYS_LSEEK   8
 %define SYS_ACCESS  21
 %define SYS_EXIT    60
+%define SYS_SYSINFO       99
+%define SYS_CLOCK_GETTIME  228
 
 ; open() flags
 %define O_RDONLY    0
@@ -100,6 +102,39 @@ key_content:        db "content", 0
 key_text:           db "text", 0
 key_error:          db "error", 0
 
+; Tool use JSON key targets
+key_stop_reason:    db "stop_reason", 0
+key_type:           db "type", 0
+key_id:             db "id", 0
+key_name:           db "name", 0
+val_tool_use:       db "tool_use", 0
+
+; Tool names
+tool_get_time:      db "get_time", 0
+tool_sys_status:    db "system_status", 0
+
+; Tools definition JSON (appended to every API request, closes with ] for tools array only)
+tools_json:         db ',"tools":[{"name":"get_time","description":"Get current UTC time as Unix timestamp","input_schema":{"type":"object","properties":{}}},{"name":"system_status","description":"Get system uptime, memory, load, and process count","input_schema":{"type":"object","properties":{}}}]', 0
+
+; Tool result message fragments
+asst_content_pre:   db ',{"role":"assistant","content":', 0
+asst_content_post:  db '}', 0
+tool_result_pre:    db ',{"role":"user","content":[{"type":"tool_result","tool_use_id":"', 0
+tool_result_mid:    db '","content":"', 0
+tool_result_post:   db '"}]}', 0
+
+; Tool result formatting
+time_prefix:        db 'Unix timestamp: ', 0
+sysinfo_uptime:     db 'Uptime: ', 0
+sysinfo_mem_total:  db ' seconds, Total RAM: ', 0
+sysinfo_mem_free:   db ' bytes, Free RAM: ', 0
+sysinfo_load:       db ' bytes, Load (1m): ', 0
+sysinfo_procs:      db ', Processes: ', 0
+
+; Unknown tool error
+unknown_tool_msg:   db "Unknown tool", 0
+unknown_tool_len:   equ $ - unknown_tool_msg - 1
+
 ; Newline
 newline:            db 10
 
@@ -139,6 +174,19 @@ response_len:   resq 1
 
 ; Env pointer
 envp_ptr:       resq 1
+
+; Tool use state
+json_msgs_end_pos:  resq 1      ; saved position in json_out_buf for tool follow-up
+tool_content_start: resq 1      ; pointer to content array [ in LLM response
+tool_content_end:   resq 1      ; pointer past content array ] in LLM response
+tool_id_buf:        resb 128    ; extracted tool_use id
+tool_name_buf:      resb 64     ; extracted tool name
+tool_result_buf:    resb 512    ; formatted tool execution result
+tool_result_len:    resq 1      ; length of tool result
+
+; Syscall struct buffers
+timespec_buf:       resb 16     ; struct timespec: tv_sec(8) + tv_nsec(8)
+sysinfo_buf:        resb 128    ; struct sysinfo (~112 bytes, padded)
 
 ; ============================================================================
 ; TEXT SECTION — code
@@ -341,10 +389,13 @@ main_loop:
     mov rax, SYS_CLOSE
     syscall
 
-    ; Step 14: Parse response — extract content[0].text or detect error
+    ; Step 14: Parse response — extract text, detect tool_use, or error
     lea rsi, [json_in_buf]
     call parse_llm_response
-    ; rax = 0 if error, otherwise response_buf has the text, response_len has length
+    ; rax = 0: error, 1: text response, 2: tool_use
+
+    cmp rax, 2
+    je .handle_tool_use
 
     test rax, rax
     jnz .have_response
@@ -356,6 +407,50 @@ main_loop:
     rep movsb
     mov qword [response_len], error_response_len
     jmp .skip_history       ; don't save error exchanges
+
+.handle_tool_use:
+    ; Execute the requested tool (result in tool_result_buf)
+    call execute_tool
+
+    ; Build follow-up payload with assistant content + tool result
+    call build_tool_followup_payload
+    ; rax = payload length
+
+    ; Send to LLM bridge
+    mov rdi, [fd_fifo_llm_req]
+    lea rsi, [json_out_buf]
+    mov rdx, rax
+    call sys_write
+
+    ; Write \n\n delimiter
+    mov rdi, [fd_fifo_llm_req]
+    lea rsi, [json_delim]
+    mov rdx, 2
+    call sys_write
+
+    ; Open fifo_llm_res, read response, close
+    lea rdi, [fifo_llm_res_path]
+    mov rsi, O_RDONLY
+    call sys_open_file
+    mov [fd_fifo_llm_res], rax
+    call read_llm_response
+    mov rdi, [fd_fifo_llm_res]
+    mov rax, SYS_CLOSE
+    syscall
+
+    ; Parse final response (expect text this time)
+    lea rsi, [json_in_buf]
+    call parse_llm_response
+    cmp rax, 1
+    je .have_response
+
+    ; Error or unexpected second tool_use
+    lea rsi, [error_response]
+    lea rdi, [response_buf]
+    mov rcx, error_response_len
+    rep movsb
+    mov qword [response_len], error_response_len
+    jmp .skip_history
 
 .have_response:
     ; Step 15: Append to history.jsonl
@@ -1053,9 +1148,21 @@ build_json_payload:
     lea rsi, [json_quote_close]
     call strcpy_to
 
-    ; ]}
-    lea rsi, [json_end]
+    ; Save position for tool_use follow-up (end of messages content)
+    mov [json_msgs_end_pos], rdi
+
+    ; Close messages array: ]
+    mov byte [rdi], ']'
+    inc rdi
+
+    ; Add tools definition: ,"tools":[...]
+    lea rsi, [tools_json]
     call strcpy_to
+
+    ; Close root object: }
+    mov byte [rdi], '}'
+    inc rdi
+    mov byte [rdi], 0
 
     ; Calculate total length
     lea rax, [json_out_buf]
@@ -1122,8 +1229,8 @@ read_llm_response:
 
 ; --- parse_llm_response: structural JSON parser ---
 ; rsi = JSON string (null-terminated) in json_in_buf
-; Extracts content[0].text into response_buf
-; Returns 1 in rax on success, 0 on error (or if "error" key found)
+; Returns: 0 = error, 1 = text response (in response_buf), 2 = tool_use
+; For tool_use: tool_id_buf, tool_name_buf, tool_content_start/end are set
 parse_llm_response:
     push rbx
     push r12
@@ -1139,56 +1246,153 @@ parse_llm_response:
     test rax, rax
     jnz .plr_error
 
-    ; Navigate to content[0].text
+    ; Check "stop_reason" key to detect tool_use
     mov rsi, r12
+    lea rdi, [key_stop_reason]
+    call json_find_key_at_depth0
+    test rax, rax
+    jz .plr_extract_text    ; no stop_reason, try text
+    mov rsi, rax
+    call skip_ws
+    cmp byte [rsi], '"'
+    jne .plr_extract_text
+    inc rsi                 ; skip quote
+    lea rdi, [val_tool_use]
+    call json_key_matches
+    test rax, rax
+    jz .plr_extract_text    ; not "tool_use", extract text
 
-    ; Step 1: Find "content" key at root level
+    ; --- stop_reason is "tool_use" ---
+    ; Find and save content array boundaries
+    mov rsi, r12
     lea rdi, [key_content]
     call json_find_key_at_depth0
     test rax, rax
     jz .plr_error
-    mov rsi, rax            ; rsi points to value after "content":
+    mov rsi, rax            ; points to [ of content array
+    mov [tool_content_start], rsi
 
-    ; Step 2: Skip whitespace, expect [
+    ; Find end of content array
+    push rsi
+    call json_skip_value
+    mov [tool_content_end], rsi
+    pop rsi
+
+    ; Navigate into content array to find tool_use block
     call skip_ws
     cmp byte [rsi], '['
     jne .plr_error
     inc rsi                 ; skip [
 
-    ; Step 3: Skip whitespace, expect { (first array element)
+.plr_find_tool_block:
     call skip_ws
+    cmp byte [rsi], ']'
+    je .plr_error           ; end of array, no tool_use found
     cmp byte [rsi], '{'
     jne .plr_error
-    inc rsi                 ; skip {
 
-    ; Step 4: Find "text" key inside this object
-    lea rdi, [key_text]
-    ; rsi is inside the object, find the key
+    mov r15, rsi            ; save position at { for skipping
+    inc rsi                 ; skip {
+    mov r14, rsi            ; save object interior start
+
+    ; Check if "type" == "tool_use"
+    mov rsi, r14
+    lea rdi, [key_type]
+    call json_find_key_in_object
+    test rax, rax
+    jz .plr_skip_content_obj
+    mov rsi, rax
+    call skip_ws
+    cmp byte [rsi], '"'
+    jne .plr_skip_content_obj
+    inc rsi
+    lea rdi, [val_tool_use]
+    call json_key_matches
+    test rax, rax
+    jz .plr_skip_content_obj
+
+    ; Found tool_use block! Extract "id"
+    mov rsi, r14
+    lea rdi, [key_id]
     call json_find_key_in_object
     test rax, rax
     jz .plr_error
-    mov rsi, rax            ; points to value after "text":
-
-    ; Step 5: Extract string value
+    mov rsi, rax
     call skip_ws
     cmp byte [rsi], '"'
     jne .plr_error
-    inc rsi                 ; skip opening quote
+    inc rsi
+    lea rdi, [tool_id_buf]
+    call json_extract_string
+
+    ; Extract "name"
+    mov rsi, r14
+    lea rdi, [key_name]
+    call json_find_key_in_object
+    test rax, rax
+    jz .plr_error
+    mov rsi, rax
+    call skip_ws
+    cmp byte [rsi], '"'
+    jne .plr_error
+    inc rsi
+    lea rdi, [tool_name_buf]
+    call json_extract_string
+
+    ; Return 2 = tool_use
+    mov rax, 2
+    jmp .plr_ret
+
+.plr_skip_content_obj:
+    ; Skip this content object and try next
+    mov rsi, r15            ; restore to {
+    call json_skip_value    ; skip entire object {...}
+    call skip_ws
+    cmp byte [rsi], ','
+    jne .plr_find_tool_block
+    inc rsi                 ; skip comma
+    jmp .plr_find_tool_block
+
+.plr_extract_text:
+    ; Navigate to content[0].text (normal text response)
+    mov rsi, r12
+    lea rdi, [key_content]
+    call json_find_key_at_depth0
+    test rax, rax
+    jz .plr_error
+    mov rsi, rax
+
+    call skip_ws
+    cmp byte [rsi], '['
+    jne .plr_error
+    inc rsi
+
+    call skip_ws
+    cmp byte [rsi], '{'
+    jne .plr_error
+    inc rsi
+
+    lea rdi, [key_text]
+    call json_find_key_in_object
+    test rax, rax
+    jz .plr_error
+    mov rsi, rax
+
+    call skip_ws
+    cmp byte [rsi], '"'
+    jne .plr_error
+    inc rsi
 
     lea rdi, [response_buf]
     call json_extract_string
     mov [response_len], rax
 
     mov rax, 1
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
+    jmp .plr_ret
 
 .plr_error:
     xor rax, rax
+.plr_ret:
     pop r15
     pop r14
     pop r13
@@ -1539,6 +1743,244 @@ json_extract_string:
     mov rax, rdi
     pop rdi
     sub rax, rdi
+    ret
+
+; --- strcmp: compare two null-terminated strings ---
+; rsi = str1, rdi = str2
+; Returns 0 if equal, 1 if not
+strcmp:
+    push rsi
+    push rdi
+.strcmp_loop:
+    lodsb
+    cmp al, [rdi]
+    jne .strcmp_ne
+    test al, al
+    jz .strcmp_eq
+    inc rdi
+    jmp .strcmp_loop
+.strcmp_eq:
+    xor rax, rax
+    pop rdi
+    pop rsi
+    ret
+.strcmp_ne:
+    mov rax, 1
+    pop rdi
+    pop rsi
+    ret
+
+; --- itoa_to: convert unsigned 64-bit integer to decimal ---
+; rax = number, rdi = destination buffer
+; Advances rdi past written digits
+itoa_to:
+    push rbx
+    push rcx
+    push rdx
+
+    test rax, rax
+    jnz .itoa_nonzero
+    mov byte [rdi], '0'
+    inc rdi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+.itoa_nonzero:
+    xor rcx, rcx           ; digit count
+    mov rbx, 10
+.itoa_div:
+    xor rdx, rdx
+    div rbx
+    add dl, '0'
+    push rdx                ; push digit
+    inc rcx
+    test rax, rax
+    jnz .itoa_div
+
+.itoa_pop:
+    pop rax
+    stosb
+    dec rcx
+    jnz .itoa_pop
+
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; --- execute_tool: run the requested tool syscall ---
+; Reads tool_name_buf, writes result to tool_result_buf + tool_result_len
+execute_tool:
+    push rbx
+
+    lea rsi, [tool_name_buf]
+    lea rdi, [tool_get_time]
+    call strcmp
+    test rax, rax
+    jz .et_get_time
+
+    lea rsi, [tool_name_buf]
+    lea rdi, [tool_sys_status]
+    call strcmp
+    test rax, rax
+    jz .et_sys_status
+
+    ; Unknown tool
+    lea rdi, [tool_result_buf]
+    lea rsi, [unknown_tool_msg]
+    call strcpy_to
+    mov qword [tool_result_len], unknown_tool_len
+    pop rbx
+    ret
+
+.et_get_time:
+    ; clock_gettime(CLOCK_REALTIME=0, &timespec_buf)
+    mov rax, SYS_CLOCK_GETTIME
+    xor rdi, rdi                ; CLOCK_REALTIME = 0
+    lea rsi, [timespec_buf]
+    syscall
+
+    ; Format: "Unix timestamp: <seconds>"
+    lea rdi, [tool_result_buf]
+    lea rsi, [time_prefix]
+    call strcpy_to
+
+    mov rax, [timespec_buf]     ; tv_sec
+    call itoa_to
+
+    mov byte [rdi], 0
+    lea rax, [tool_result_buf]
+    mov rcx, rdi
+    sub rcx, rax
+    mov [tool_result_len], rcx
+    pop rbx
+    ret
+
+.et_sys_status:
+    ; sysinfo(&sysinfo_buf)
+    mov rax, SYS_SYSINFO
+    lea rdi, [sysinfo_buf]
+    syscall
+
+    lea rdi, [tool_result_buf]
+
+    ; "Uptime: "
+    lea rsi, [sysinfo_uptime]
+    call strcpy_to
+    mov rax, [sysinfo_buf]          ; uptime (seconds)
+    call itoa_to
+
+    ; " seconds, Total RAM: "
+    lea rsi, [sysinfo_mem_total]
+    call strcpy_to
+    mov rax, [sysinfo_buf + 32]     ; totalram
+    mov ebx, [sysinfo_buf + 104]  ; mem_unit (zero-extends to rbx)
+    mul rbx                          ; rax = totalram * mem_unit
+    call itoa_to
+
+    ; " bytes, Free RAM: "
+    lea rsi, [sysinfo_mem_free]
+    call strcpy_to
+    mov rax, [sysinfo_buf + 40]     ; freeram
+    mov ebx, [sysinfo_buf + 104]  ; mem_unit (zero-extends to rbx)
+    mul rbx
+    call itoa_to
+
+    ; " bytes, Load (1m): "
+    lea rsi, [sysinfo_load]
+    call strcpy_to
+    mov rax, [sysinfo_buf + 8]      ; loads[0], fixed-point * 65536
+    shr rax, 16                     ; integer part
+    call itoa_to
+    mov byte [rdi], '.'
+    inc rdi
+    mov rax, [sysinfo_buf + 8]
+    and rax, 0xFFFF
+    imul rax, 100
+    shr rax, 16                     ; two decimal digits
+    cmp rax, 10
+    jge .et_no_zero
+    mov byte [rdi], '0'
+    inc rdi
+.et_no_zero:
+    call itoa_to
+
+    ; ", Processes: "
+    lea rsi, [sysinfo_procs]
+    call strcpy_to
+    movzx rax, word [sysinfo_buf + 80]  ; procs
+    call itoa_to
+
+    mov byte [rdi], 0
+    lea rax, [tool_result_buf]
+    mov rcx, rdi
+    sub rcx, rax
+    mov [tool_result_len], rcx
+    pop rbx
+    ret
+
+; --- build_tool_followup_payload: append tool messages and rebuild ending ---
+; Uses json_msgs_end_pos, tool_content_start/end, tool_id_buf, tool_result_buf
+; Returns total payload length in rax
+build_tool_followup_payload:
+    ; Go back to saved position (end of messages content, before ])
+    mov rdi, [json_msgs_end_pos]
+
+    ; ,{"role":"assistant","content":<raw content array>}
+    lea rsi, [asst_content_pre]
+    call strcpy_to
+
+    ; Copy raw content array from LLM response
+    mov rsi, [tool_content_start]
+    mov rcx, [tool_content_end]
+    sub rcx, rsi
+    rep movsb
+
+    ; }
+    lea rsi, [asst_content_post]
+    call strcpy_to
+
+    ; ,{"role":"user","content":[{"type":"tool_result","tool_use_id":"
+    lea rsi, [tool_result_pre]
+    call strcpy_to
+
+    ; Tool ID (safe ASCII, no escaping needed)
+    lea rsi, [tool_id_buf]
+    call strcpy_to
+
+    ; ","content":"
+    lea rsi, [tool_result_mid]
+    call strcpy_to
+
+    ; Tool result (JSON-escaped)
+    lea rsi, [tool_result_buf]
+    mov rcx, [tool_result_len]
+    call json_escape_to
+
+    ; "}]}
+    lea rsi, [tool_result_post]
+    call strcpy_to
+
+    ; Close messages array: ]
+    mov byte [rdi], ']'
+    inc rdi
+
+    ; Tools definition
+    lea rsi, [tools_json]
+    call strcpy_to
+
+    ; Close root object
+    mov byte [rdi], '}'
+    inc rdi
+    mov byte [rdi], 0
+
+    ; Calculate length
+    lea rax, [json_out_buf]
+    mov rcx, rdi
+    sub rcx, rax
+    mov rax, rcx
     ret
 
 ; --- append_history: append user+assistant exchange to history.jsonl ---
