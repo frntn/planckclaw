@@ -1,0 +1,43 @@
+#!/bin/sh
+# configure — check build and runtime prerequisites for PlanckClaw
+# No autoconf. No m4. Just sh.
+
+ok=1
+warn=0
+
+check() {
+    printf '  %-12s' "$1"
+    if command -v "$1" >/dev/null 2>&1; then
+        printf 'ok\n'
+    else
+        if [ "$2" = "optional" ]; then
+            printf 'not found (optional — %s)\n' "$3"
+            warn=1
+        else
+            printf 'not found\n'
+            ok=0
+        fi
+    fi
+}
+
+echo "checking build dependencies..."
+check nasm
+check ld
+check make
+
+echo ""
+echo "checking runtime dependencies..."
+check curl
+check jq        optional "Discord mode only"
+check websocat  optional "Discord mode only"
+
+echo ""
+if [ "$ok" = "0" ]; then
+    echo "FAILED — install missing dependencies and re-run ./configure"
+    exit 1
+fi
+if [ "$warn" = "1" ]; then
+    echo "OK (with warnings) — run 'make' to build"
+else
+    echo "OK — run 'make' to build"
+fi
