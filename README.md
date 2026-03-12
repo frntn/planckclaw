@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/total_runtime-23_KB-green" alt="23 KB total">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="zero dependencies">
   <img src="https://img.shields.io/badge/platform-Linux_only-orange" alt="Linux only">
-  <img src="https://img.shields.io/badge/license-public_domain-lightgrey" alt="public domain">
+  <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT license">
 </p>
 
 *"Write programs that do one thing and do it well. Write programs to work together. Write programs to handle text streams, because that is a universal interface."* - Doug McIlroy, 1978
@@ -206,4 +206,4 @@ planckclaw/
 
 ## license
 
-Public domain.
+MIT. See [LICENSE](LICENSE).
