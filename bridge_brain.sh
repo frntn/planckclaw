@@ -6,6 +6,8 @@
 FIFO_REQ="/tmp/planckclaw/brain_in"
 FIFO_RES="/tmp/planckclaw/brain_out"
 
+DEBUG="${PLANCKCLAW_DEBUG:-0}"
+
 if [ -z "$ANTHROPIC_API_KEY" ]; then
     echo "bridge_brain: ANTHROPIC_API_KEY not set" >&2
     exit 1
@@ -32,7 +34,7 @@ $line"
     fi
 
     # Debug: dump payload
-    printf '%s' "$payload" > /tmp/planckclaw/last_payload.json
+    [ "$DEBUG" = "1" ] && printf '%s' "$payload" > /tmp/planckclaw/last_payload.json
 
     # Send to Anthropic API
     response=$(curl -s -w "\n%{http_code}" \
@@ -46,8 +48,8 @@ $line"
     http_code=$(echo "$response" | tail -n1)
     body=$(echo "$response" | sed '$d')
 
-    echo "bridge_brain: HTTP $http_code" >&2
-    [ "$http_code" != "200" ] && echo "bridge_brain: body=$body" >&2
+    [ "$DEBUG" = "1" ] && echo "bridge_brain: HTTP $http_code" >&2
+    [ "$DEBUG" = "1" ] && [ "$http_code" != "200" ] && echo "bridge_brain: body=$body" >&2
 
     if [ "$http_code" = "200" ] && [ -n "$body" ]; then
         printf '%s\n\n' "$body" > "$FIFO_RES"

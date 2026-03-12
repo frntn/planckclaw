@@ -7,7 +7,7 @@
 
 set -e
 
-INTERACT_BRIDGE="${1:-./bridge_discord.sh}"
+INTERACT_BRIDGE="${1:-./bridge_cli.sh}"
 
 if [ ! -x "$INTERACT_BRIDGE" ]; then
     echo "planckclaw: interact bridge '$INTERACT_BRIDGE' not found or not executable." >&2
