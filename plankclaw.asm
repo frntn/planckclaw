@@ -71,7 +71,7 @@ summary_suffix:     db "/summary.md", 0
 history_suffix:     db "/history.jsonl", 0
 
 ; JSON payload fragments
-json_start:         db '{"model":"claude-haiku-4-5-20241022","max_tokens":1024,"system":"', 0
+json_start:         db '{"model":"claude-haiku-4-5-20251001","max_tokens":1024,"system":"', 0
 json_sep_summary:   db '\n---\nCONVERSATION SUMMARY:\n', 0
 json_msgs_start:    db '","messages":[', 0
 json_role_user:     db '{"role":"user","content":"', 0
@@ -82,7 +82,7 @@ json_end:           db ']}', 0
 json_delim:         db 10, 10, 0  ; \n\n delimiter
 
 ; Compaction JSON fragments
-compact_start:      db '{"model":"claude-haiku-4-5-20241022","max_tokens":2048,"system":"You are a memory compaction assistant. Summarize the following conversation, preserving: key facts about the user, their preferences, decisions made, ongoing projects, and important context. Be concise but complete. Output only the summary, no preamble.","messages":[{"role":"user","content":"EXISTING SUMMARY:\n', 0
+compact_start:      db '{"model":"claude-haiku-4-5-20251001","max_tokens":2048,"system":"You are a memory compaction assistant. Summarize the following conversation, preserving: key facts about the user, their preferences, decisions made, ongoing projects, and important context. Be concise but complete. Output only the summary, no preamble.","messages":[{"role":"user","content":"EXISTING SUMMARY:\n', 0
 compact_mid:        db '\n\nCONVERSATION TO SUMMARIZE:\n', 0
 compact_end:        db '"}]}', 0
 
@@ -251,10 +251,10 @@ _start:
     call sys_open_file
     mov [fd_fifo_llm_req], rax
 
-    lea rdi, [fifo_llm_res_path]
-    mov rsi, O_RDONLY
-    call sys_open_file
-    mov [fd_fifo_llm_res], rax
+    ; fifo_llm_res is opened on-demand in the main loop to avoid deadlock:
+    ; opening it here (O_RDONLY) would block until bridge_llm opens the write end,
+    ; but bridge_llm only writes after receiving a request — which the agent
+    ; can't send while blocked on this open().
 
 ; ============================================================================
 ; MAIN LOOP
@@ -328,8 +328,18 @@ main_loop:
     mov rdx, 2
     call sys_write
 
-    ; Step 13: Read response from fifo_llm_res until \n\n
+    ; Step 13: Open fifo_llm_res (deferred to avoid deadlock), read response, close
+    lea rdi, [fifo_llm_res_path]
+    mov rsi, O_RDONLY
+    call sys_open_file
+    mov [fd_fifo_llm_res], rax
+
     call read_llm_response
+
+    ; Close fifo_llm_res so bridge_llm can reopen it next round
+    mov rdi, [fd_fifo_llm_res]
+    mov rax, SYS_CLOSE
+    syscall
 
     ; Step 14: Parse response — extract content[0].text or detect error
     lea rsi, [json_in_buf]
@@ -380,7 +390,7 @@ main_loop:
     inc rdi
     lea rsi, [response_buf]
     mov rcx, [response_len]
-    rep movsb
+    call escape_for_fifo
     mov byte [rdi], 10      ; \n
     inc rdi
 
@@ -464,6 +474,45 @@ strcpy:
     jnz .sc_loop
     lea rax, [rdi - 1]      ; point to the null terminator
     pop rdi
+    ret
+
+; --- escape_for_fifo: copy with escaping for FIFO protocol ---
+; rsi = src, rdi = dest, rcx = src length
+; Escapes: \ → \\, newline → \n, tab → \t
+; Advances rdi past output
+escape_for_fifo:
+.eff_loop:
+    test rcx, rcx
+    jz .eff_done
+    lodsb
+    dec rcx
+    cmp al, '\'
+    je .eff_backslash
+    cmp al, 10
+    je .eff_newline
+    cmp al, 9
+    je .eff_tab
+    stosb
+    jmp .eff_loop
+.eff_backslash:
+    mov byte [rdi], '\'
+    inc rdi
+    mov byte [rdi], '\'
+    inc rdi
+    jmp .eff_loop
+.eff_newline:
+    mov byte [rdi], '\'
+    inc rdi
+    mov byte [rdi], 'n'
+    inc rdi
+    jmp .eff_loop
+.eff_tab:
+    mov byte [rdi], '\'
+    inc rdi
+    mov byte [rdi], 't'
+    inc rdi
+    jmp .eff_loop
+.eff_done:
     ret
 
 ; --- strcpy_to: copy null-terminated string, advance rdi ---
@@ -862,7 +911,7 @@ build_json_payload:
 
     lea rdi, [json_out_buf]
 
-    ; {"model":"claude-haiku-4-5-20241022","max_tokens":1024,"system":"
+    ; {"model":"claude-haiku-4-5-20251001","max_tokens":1024,"system":"
     lea rsi, [json_start]
     call strcpy_to
 
@@ -1708,8 +1757,19 @@ do_compaction:
     mov rdx, 2
     call sys_write
 
+    ; Open fifo_llm_res for compaction response
+    lea rdi, [fifo_llm_res_path]
+    mov rsi, O_RDONLY
+    call sys_open_file
+    mov [fd_fifo_llm_res], rax
+
     ; Read compaction response
     call read_llm_response
+
+    ; Close fifo_llm_res
+    mov rdi, [fd_fifo_llm_res]
+    mov rax, SYS_CLOSE
+    syscall
 
     ; Parse response to get summary text
     lea rsi, [json_in_buf]
