@@ -1,10 +1,41 @@
 # plankclaw
 
-The smallest possible functional AI agent on Linux x86-64. Target: < 8 KB binary.
+An AI agent in 5,408 bytes of x86-64 assembly. No libc, no runtime, no allocator. Just Linux syscalls.
 
-plankclaw is an autonomous AI agent that receives messages from Discord, sends them to the Claude API, and returns responses — all while maintaining persistent memory between sessions. The compiled agent binary is written entirely in x86-64 assembly. Network complexity (TLS, HTTP, WebSocket) is delegated to host tools (`curl`, `websocat`, `jq`).
+plankclaw is an autonomous agent that listens on Discord, talks to the Claude API, and remembers things between sessions. The core is a static binary compiled from ~1,800 lines of NASM assembly. It does zero networking; that part is delegated to shell scripts and standard Unix tools (`curl`, `websocat`, `jq`), composed through named pipes. Three processes, four FIFOs, one agent. That's it.
 
-## Architecture
+The entire runtime footprint (binary, shell scripts, config, soul file) is 17 KB. That's the whole agent. It fits on a 1.44 MB floppy disk about 85 times.
+
+Modern AI agent frameworks ship hundreds of megabytes of runtimes, package managers, and abstraction layers before a single token is generated. LangChain alone pulls in 400+ transitive dependencies. plankclaw asks: what if we stripped all of that away? What's the smallest thing that can still think?
+
+## quick start
+
+```sh
+make                          # build the 5KB binary
+cp config.env.example config.env
+# edit config.env → add your Discord bot token, channel ID, Anthropic API key
+./plankclaw.sh                # run
+```
+
+You'll need `nasm`, `curl`, `jq`, and `websocat` installed (see [install](#install) below). Send a message to your bot on Discord. It answers. It remembers.
+
+## what is this
+
+This is a style exercise. A deliberate return to the Unix philosophy: do one thing, and do it well.
+
+The agent binary does no networking. It reads from a pipe, writes to a pipe, and persists state to files. It builds JSON payloads for the Claude API by hand (no JSON library, just `stosb` and careful quoting). It parses API responses with a structural JSON walker written in x86-64. It escapes strings, manages conversation history, triggers memory compaction when history grows too long, and writes responses back out. All of this in raw assembly, with raw `read`/`write`/`open`/`close` syscalls. No malloc. No printf. No libc at all. The binary is fully static and has zero runtime dependencies.
+
+Everything else is composed around it:
+
+- `bridge_discord.sh` connects to the Discord Gateway via WebSocket, relays messages through FIFOs. ~180 lines of shell.
+- `bridge_llm.sh` takes JSON payloads from a FIFO, `curl`s the Anthropic API, writes responses back. ~85 lines of shell.
+- `plankclaw.sh` creates pipes, starts all three processes, cleans up on exit. ~75 lines of shell.
+
+The total codebase is ~2,200 lines. The compiled binary is 5,408 bytes. It runs in ~200KB of RAM (mostly BSS buffers). There is no build system beyond a 6-line Makefile. There are no dependencies beyond what's already on your Linux box (plus `websocat`).
+
+The point is not that you should write your agents in assembly. The point is that you *can*, that the core logic of an AI agent (read, think, remember, respond) is simple enough to fit in a few kilobytes of machine code. Everything else is ceremony.
+
+## architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -28,85 +59,70 @@ plankclaw is an autonomous AI agent that receives messages from Discord, sends t
 └─────────────────────────────────────────────────────┘
 ```
 
-Three processes communicate through four named pipes (FIFOs):
+Three processes, four named pipes. The agent never touches the network. The bridges never touch the state. Clean separation.
 
-- **Agent** (`plankclaw`) — x86-64 assembly binary. Reads messages, builds Claude API payloads, parses responses, persists history. No networking.
-- **Bridge Discord** (`bridge_discord.sh`) — Shell script. Connects to Discord Gateway via WebSocket, relays messages.
-- **Bridge LLM** (`bridge_llm.sh`) — Shell script. Sends JSON payloads to the Anthropic API via `curl`.
+- **Agent** (`plankclaw`): the 5KB binary. Reads messages, builds API payloads, parses responses, persists history and memory. Written in x86-64 assembly. No networking.
+- **Bridge Discord** (`bridge_discord.sh`): connects to the Discord Gateway via WebSocket (`websocat`), relays user messages into `fifo_in`, sends agent responses from `fifo_out` to Discord via REST API.
+- **Bridge LLM** (`bridge_llm.sh`): reads JSON payloads from `fifo_llm_req`, sends them to the Anthropic Messages API via `curl`, writes responses to `fifo_llm_res`. Retries on failure.
 
-## Requirements
+## memory
 
-- Linux x86-64
-- [NASM](https://nasm.us/) (assembler)
-- `curl` (HTTP client)
-- `jq` (JSON processor)
-- [websocat](https://github.com/vi/websocat) (WebSocket client)
+The agent maintains three files:
 
-## Build
+- `memory/soul.md`: system prompt, personality. You write this. The agent reads it on startup and injects it into every API call.
+- `memory/history.jsonl`: full conversation log, append-only JSONL. One line per message, alternating user/assistant roles.
+- `memory/summary.md`: compacted memory. When history exceeds `HISTORY_MAX` lines (default: 200), the agent sends old conversations to the LLM for summarization, keeps the last `HISTORY_KEEP` lines (default: 40), and stores the summary here. Next conversations include the summary as context.
 
-```sh
-make
-make size   # show binary size
-```
+This gives the agent long-term memory that survives restarts and grows without bound (thanks to compaction). Edit `soul.md` to change who the agent is. Delete `history.jsonl` and `summary.md` to wipe its memory.
 
-## Setup
+## configuration
 
-1. Copy and edit the config file:
-   ```sh
-   cp config.env.example config.env
-   # Edit config.env with your Discord Bot Token, Channel ID, and Anthropic API Key
-   ```
-
-2. (Optional) Edit `memory/soul.md` to customize the bot's personality.
-
-3. Make scripts executable:
-   ```sh
-   chmod +x plankclaw.sh bridge_discord.sh bridge_llm.sh
-   ```
-
-4. Run:
-   ```sh
-   ./plankclaw.sh
-   ```
-
-## Memory System
-
-- `memory/soul.md` — System prompt / personality (human-editable)
-- `memory/history.jsonl` — Conversation log (append-only JSONL)
-- `memory/summary.md` — Compacted memory summary (auto-generated)
-
-When history exceeds `HISTORY_MAX` lines (default: 200), old conversations are summarized by the LLM and stored in `summary.md`. The last `HISTORY_KEEP` lines (default: 40) are kept as-is.
-
-## Configuration
-
-Environment variables (set in `config.env`):
+Environment variables in `config.env`:
 
 | Variable | Description | Default |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | Discord bot token | (required) |
-| `DISCORD_CHANNEL_ID` | Discord channel to listen on | (required) |
+| `DISCORD_CHANNEL_ID` | Channel to listen on | (required) |
 | `ANTHROPIC_API_KEY` | Anthropic API key | (required) |
-| `PLANKCLAW_DIR` | Memory file directory | `./memory` |
-| `HISTORY_MAX` | Max history lines before compaction | `200` |
-| `HISTORY_KEEP` | Lines to keep after compaction | `40` |
+| `PLANKCLAW_DIR` | Memory directory | `./memory` |
+| `HISTORY_MAX` | Lines before compaction | `200` |
+| `HISTORY_KEEP` | Lines kept after compaction | `40` |
 
-## File Structure
+## install
+
+**Build tools** (to compile the agent):
+
+```sh
+sudo apt install nasm binutils make    # Debian/Ubuntu
+sudo dnf install nasm binutils make    # Fedora
+```
+
+**Runtime tools** (to run):
+
+```sh
+sudo apt install curl jq               # Debian/Ubuntu
+```
+
+Plus [websocat](https://github.com/vi/websocat), grab a binary from the releases page. It's a single static binary (the Unix way).
+
+You'll also need a [Discord bot token](https://discord.com/developers/applications) with the Message Content intent enabled, and an [Anthropic API key](https://console.anthropic.com/).
+
+## files
 
 ```
 plankclaw/
-├── plankclaw.asm          # Agent — x86-64 NASM assembly source
-├── Makefile               # nasm + ld → plankclaw binary
-├── plankclaw.sh           # Launcher
-├── bridge_discord.sh      # Bridge Discord
-├── bridge_llm.sh          # Bridge LLM
-├── config.env.example     # Config template
-├── memory/
-│   ├── soul.md            # Persistent system prompt
-│   ├── summary.md         # Cumulative summary (generated)
-│   └── history.jsonl      # Raw history (generated)
-└── README.md
+├── plankclaw.asm          # the agent, 1,800 lines of x86-64 NASM
+├── Makefile               # nasm + ld → 5KB binary
+├── plankclaw.sh           # launcher, starts everything, cleans up on exit
+├── bridge_discord.sh      # Discord ↔ FIFO bridge
+├── bridge_llm.sh          # FIFO ↔ Anthropic API bridge
+├── config.env.example     # config template
+└── memory/
+    ├── soul.md            # who the agent is (you write this)
+    ├── history.jsonl      # conversation log (auto-generated)
+    └── summary.md         # compacted memory (auto-generated)
 ```
 
-## License
+## license
 
 Public domain.
