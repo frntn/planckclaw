@@ -1,6 +1,5 @@
 ; planckclaw.asm — The smallest possible functional AI agent on Linux x86-64
-; Reads messages from fifo_in, builds Claude API payloads, sends via fifo_llm,
-; persists history, and writes responses to fifo_out.
+; Pure router: interact ↔ brain ↔ claw, via 3 FIFO pairs.
 ; Assembled with NASM, linked with ld.
 
 bits 64
@@ -16,8 +15,6 @@ default rel
 %define SYS_LSEEK   8
 %define SYS_ACCESS  21
 %define SYS_EXIT    60
-%define SYS_SYSINFO       99
-%define SYS_CLOCK_GETTIME  228
 
 ; open() flags
 %define O_RDONLY    0
@@ -52,10 +49,12 @@ default rel
 section .data
 
 ; FIFO paths
-fifo_in_path:       db "/tmp/planckclaw/fifo_in", 0
-fifo_out_path:      db "/tmp/planckclaw/fifo_out", 0
-fifo_llm_req_path:  db "/tmp/planckclaw/fifo_llm_req", 0
-fifo_llm_res_path:  db "/tmp/planckclaw/fifo_llm_res", 0
+interact_in_path:   db "/tmp/planckclaw/interact_in", 0
+interact_out_path:  db "/tmp/planckclaw/interact_out", 0
+brain_in_path:      db "/tmp/planckclaw/brain_in", 0
+brain_out_path:     db "/tmp/planckclaw/brain_out", 0
+claw_in_path:       db "/tmp/planckclaw/claw_in", 0
+claw_out_path:      db "/tmp/planckclaw/claw_out", 0
 
 ; Env var names
 env_dir:            db "PLANCKCLAW_DIR", 0
@@ -107,33 +106,19 @@ key_stop_reason:    db "stop_reason", 0
 key_type:           db "type", 0
 key_id:             db "id", 0
 key_name:           db "name", 0
+key_input:          db "input", 0
 val_tool_use:       db "tool_use", 0
 
-; Tool names
-tool_get_time:      db "get_time", 0
-tool_sys_status:    db "system_status", 0
-
-; Tools definition JSON (appended to every API request, closes with ] for tools array only)
-tools_json:         db ',"tools":[{"name":"get_time","description":"Get current UTC time as Unix timestamp","input_schema":{"type":"object","properties":{}}},{"name":"system_status","description":"Get system uptime, memory, load, and process count","input_schema":{"type":"object","properties":{}}}]', 0
-
-; Tool result message fragments
+; Tool use follow-up message fragments
 asst_content_pre:   db ',{"role":"assistant","content":', 0
 asst_content_post:  db '}', 0
 tool_result_pre:    db ',{"role":"user","content":[{"type":"tool_result","tool_use_id":"', 0
 tool_result_mid:    db '","content":"', 0
 tool_result_post:   db '"}]}', 0
 
-; Tool result formatting
-time_prefix:        db 'Unix timestamp: ', 0
-sysinfo_uptime:     db 'Uptime: ', 0
-sysinfo_mem_total:  db ' seconds, Total RAM: ', 0
-sysinfo_mem_free:   db ' bytes, Free RAM: ', 0
-sysinfo_load:       db ' bytes, Load (1m): ', 0
-sysinfo_procs:      db ', Processes: ', 0
-
-; Unknown tool error
-unknown_tool_msg:   db "Unknown tool", 0
-unknown_tool_len:   equ $ - unknown_tool_msg - 1
+; Tools bridge discovery command
+tools_discovery_cmd: db "__list_tools__", 10, 0  ; __list_tools__\n
+tools_discovery_len: equ $ - tools_discovery_cmd - 1
 
 ; Newline
 newline:            db 10
@@ -144,10 +129,12 @@ newline:            db 10
 section .bss
 
 ; File descriptors
-fd_fifo_in:     resq 1
-fd_fifo_out:    resq 1
-fd_fifo_llm_req: resq 1
-fd_fifo_llm_res: resq 1
+fd_interact_in:  resq 1
+fd_interact_out: resq 1
+fd_brain_in:     resq 1
+fd_brain_out:    resq 1
+fd_claw_in:   resq 1
+fd_claw_out:  resq 1
 
 ; Configuration
 history_max:    resq 1      ; max lines before compaction
@@ -181,12 +168,14 @@ tool_content_start: resq 1      ; pointer to content array [ in LLM response
 tool_content_end:   resq 1      ; pointer past content array ] in LLM response
 tool_id_buf:        resb 128    ; extracted tool_use id
 tool_name_buf:      resb 64     ; extracted tool name
-tool_result_buf:    resb 512    ; formatted tool execution result
+tool_input_buf:     resb 512    ; extracted tool input JSON
+tool_input_len:     resq 1      ; length of tool input
+tool_result_buf:    resb 4096   ; tool result from bridge
 tool_result_len:    resq 1      ; length of tool result
 
-; Syscall struct buffers
-timespec_buf:       resb 16     ; struct timespec: tv_sec(8) + tv_nsec(8)
-sysinfo_buf:        resb 128    ; struct sysinfo (~112 bytes, padded)
+; Dynamic tools definition (from bridge)
+tools_json_buf:     resb 4096   ; tools JSON array from discovery
+tools_json_len:     resq 1      ; length of tools JSON
 
 ; ============================================================================
 ; TEXT SECTION — code
@@ -284,44 +273,48 @@ _start:
     mov [summary_len], rax
 
     ; --- Open FIFOs ---
-    lea rdi, [fifo_in_path]
+    lea rdi, [interact_in_path]
     mov rsi, O_RDONLY
     call sys_open_file
-    mov [fd_fifo_in], rax
+    mov [fd_interact_in], rax
 
-    lea rdi, [fifo_out_path]
+    lea rdi, [interact_out_path]
     mov rsi, O_WRONLY
     call sys_open_file
-    mov [fd_fifo_out], rax
+    mov [fd_interact_out], rax
 
-    lea rdi, [fifo_llm_req_path]
+    lea rdi, [brain_in_path]
     mov rsi, O_WRONLY
     call sys_open_file
-    mov [fd_fifo_llm_req], rax
+    mov [fd_brain_in], rax
 
-    ; fifo_llm_res is opened on-demand in the main loop to avoid deadlock:
-    ; opening it here (O_RDONLY) would block until bridge_llm opens the write end,
-    ; but bridge_llm only writes after receiving a request — which the agent
-    ; can't send while blocked on this open().
+    lea rdi, [claw_in_path]
+    mov rsi, O_WRONLY
+    call sys_open_file
+    mov [fd_claw_in], rax
+
+    ; brain_out and claw_out are opened on-demand to avoid deadlock:
+    ; opening them here (O_RDONLY) would block until the bridge opens the
+    ; write end, but bridges only write after receiving a request.
 
 ; ============================================================================
 ; MAIN LOOP
 ; ============================================================================
 main_loop:
-    ; Step 8: read from fifo_in (blocking)
-    mov rdi, [fd_fifo_in]
+    ; Step 1: read from interact_in (blocking)
+    mov rdi, [fd_interact_in]
     lea rsi, [msg_in_buf]
     mov rdx, MAX_MSG_IN - 1
     call sys_read
     cmp rax, 0
-    jle .reopen_fifo_in     ; EOF or error — reopen FIFO
+    jle .reopen_interact_in ; EOF or error — reopen FIFO
     mov [msg_len], rax
     ; Null-terminate
     lea rdi, [msg_in_buf]
     add rdi, rax
     mov byte [rdi], 0
 
-    ; Step 9: Parse channel_id and message (separated by \t, terminated by \n)
+    ; Step 2: Parse channel_id and message (separated by \t, terminated by \n)
     lea rsi, [msg_in_buf]
     lea rdi, [channel_buf]
     ; Copy channel_id until \t
@@ -354,42 +347,45 @@ main_loop:
     push rsi
     push rcx
 
-    ; Step 10: Read last HISTORY_KEEP lines from history.jsonl
+    ; Step 3: Discovery — ask tools bridge for available tools
+    call discover_tools
+
+    ; Step 4: Read last HISTORY_KEEP lines from history.jsonl
     call load_recent_history
 
-    ; Step 11: Build JSON payload
+    ; Step 5: Build JSON payload
     pop rcx                 ; message length
     pop rsi                 ; message pointer
     push rsi                ; save again for history append
     push rcx
     call build_json_payload
 
-    ; Step 12: Write payload to fifo_llm_req with \n\n delimiter
-    mov rdi, [fd_fifo_llm_req]
+    ; Step 6: Write payload to brain_in with \n\n delimiter
+    mov rdi, [fd_brain_in]
     lea rsi, [json_out_buf]
     mov rdx, rax            ; rax = payload length from build_json_payload
     call sys_write
 
     ; Write \n\n delimiter
-    mov rdi, [fd_fifo_llm_req]
+    mov rdi, [fd_brain_in]
     lea rsi, [json_delim]
     mov rdx, 2
     call sys_write
 
-    ; Step 13: Open fifo_llm_res (deferred to avoid deadlock), read response, close
-    lea rdi, [fifo_llm_res_path]
+    ; Step 7: Open brain_out (deferred to avoid deadlock), read response, close
+    lea rdi, [brain_out_path]
     mov rsi, O_RDONLY
     call sys_open_file
-    mov [fd_fifo_llm_res], rax
+    mov [fd_brain_out], rax
 
-    call read_llm_response
+    call read_brain_response
 
-    ; Close fifo_llm_res so bridge_llm can reopen it next round
-    mov rdi, [fd_fifo_llm_res]
+    ; Close brain_out so bridge can reopen next round
+    mov rdi, [fd_brain_out]
     mov rax, SYS_CLOSE
     syscall
 
-    ; Step 14: Parse response — extract text, detect tool_use, or error
+    ; Step 8: Parse response — extract text, detect tool_use, or error
     lea rsi, [json_in_buf]
     call parse_llm_response
     ; rax = 0: error, 1: text response, 2: tool_use
@@ -409,32 +405,32 @@ main_loop:
     jmp .skip_history       ; don't save error exchanges
 
 .handle_tool_use:
-    ; Execute the requested tool (result in tool_result_buf)
-    call execute_tool
+    ; Dispatch tool call to tools bridge via FIFO
+    call dispatch_tool
 
     ; Build follow-up payload with assistant content + tool result
     call build_tool_followup_payload
     ; rax = payload length
 
-    ; Send to LLM bridge
-    mov rdi, [fd_fifo_llm_req]
+    ; Send to brain bridge
+    mov rdi, [fd_brain_in]
     lea rsi, [json_out_buf]
     mov rdx, rax
     call sys_write
 
     ; Write \n\n delimiter
-    mov rdi, [fd_fifo_llm_req]
+    mov rdi, [fd_brain_in]
     lea rsi, [json_delim]
     mov rdx, 2
     call sys_write
 
-    ; Open fifo_llm_res, read response, close
-    lea rdi, [fifo_llm_res_path]
+    ; Open brain_out, read response, close
+    lea rdi, [brain_out_path]
     mov rsi, O_RDONLY
     call sys_open_file
-    mov [fd_fifo_llm_res], rax
-    call read_llm_response
-    mov rdi, [fd_fifo_llm_res]
+    mov [fd_brain_out], rax
+    call read_brain_response
+    mov rdi, [fd_brain_out]
     mov rax, SYS_CLOSE
     syscall
 
@@ -453,7 +449,7 @@ main_loop:
     jmp .skip_history
 
 .have_response:
-    ; Step 15: Append to history.jsonl
+    ; Append to history.jsonl
     pop rcx                 ; message length
     pop rsi                 ; message pointer
     push rsi
@@ -469,14 +465,14 @@ main_loop:
     push rcx
 
 .do_compact:
-    ; Step 16: Check compaction
+    ; Check compaction
     call count_history_lines
     cmp rax, [history_max]
     jl .no_compact
     call do_compaction
 .no_compact:
 
-    ; Step 17: Write response to fifo_out: channel_id\tresponse\n
+    ; Write response to interact_out: channel_id\tresponse\n
     ; Build output in json_out_buf (reuse as scratch)
     lea rdi, [json_out_buf]
     lea rsi, [channel_buf]
@@ -493,7 +489,7 @@ main_loop:
     lea rsi, [json_out_buf]
     mov rdx, rdi
     sub rdx, rsi
-    mov rdi, [fd_fifo_out]
+    mov rdi, [fd_interact_out]
     call sys_write
 
     ; Clean up stack
@@ -502,15 +498,15 @@ main_loop:
 
     jmp main_loop
 
-.reopen_fifo_in:
-    ; Close and reopen fifo_in (writer disconnected)
-    mov rdi, [fd_fifo_in]
+.reopen_interact_in:
+    ; Close and reopen interact_in (writer disconnected)
+    mov rdi, [fd_interact_in]
     mov rax, SYS_CLOSE
     syscall
-    lea rdi, [fifo_in_path]
+    lea rdi, [interact_in_path]
     mov rsi, O_RDONLY
     call sys_open_file
-    mov [fd_fifo_in], rax
+    mov [fd_interact_in], rax
     jmp main_loop
 
 ; ============================================================================
@@ -1082,62 +1078,16 @@ build_json_payload:
     call strcpy_to
 
     ; JSON-escape the incoming message
-    ; First unescape FIFO escaping, then re-escape for JSON
-    mov rsi, r12            ; original message
-    lea rdi, [temp_buf]
+    ; First unescape FIFO escaping (\n, \t, \\), then re-escape for JSON
+    ; Save rdi (json_out_buf write position) before clobbering it
     push rdi
-    call unescape_fifo_msg
-    mov r13, rax            ; unescaped length
 
-    ; Now JSON-escape from temp_buf to json_out_buf
-    ; Need to restore rdi to json_out_buf position
-    ; We saved the json_out_buf position... we need to track it
-    ; Actually, let me restructure: save json_out_buf write position
-    pop rsi                 ; temp_buf (unescaped message)
-    ; Find where we left off in json_out_buf
-    ; We need to recalculate... Let me use a different approach
-    ; The strcpy_to above left rdi pointing past the last write in json_out_buf
-    ; But then we used rdi for temp_buf. We need to save/restore.
-
-    ; Let me redo this part more carefully
-    ; Back up: rdi was pointing into json_out_buf after strcpy_to of json_role_user
-    ; Then we clobbered rdi. We need to fix this.
-
-    ; Actually, let me re-check the flow. After .bjp_add_current:
-    ; lea rsi, [json_role_user] / call strcpy_to leaves rdi at the write position
-    ; Then we need to unescape + json_escape the message into rdi
-    ; But unescape_fifo_msg also uses rdi. Solution: save rdi first.
-
-    ; This is getting complex. Let me use a cleaner approach:
-    ; Save the json_out_buf write position in rbx before unescaping.
-
-    ; We already wrote to rdi and then lost it. For this build, let's use
-    ; a simpler approach: skip the unescape step and just JSON-escape the
-    ; FIFO-escaped message directly. The FIFO escaping uses \\n and \\t which
-    ; are already JSON-compatible escapes.
-
-    ; r12 = original FIFO-escaped message, r13 = original msg length from caller
-    ; Actually r13 was the unescaped length now. Let's use a different register.
-
-    ; Let me restart build_json_payload with a cleaner register plan.
-    jmp .bjp_restart_msg
-
-.bjp_restart_msg:
-    ; At this point, we've lost track of rdi. Let's find where json_role_user
-    ; was appended by scanning json_out_buf for the end.
-    lea rdi, [json_out_buf]
-    call strlen_from_rdi
-    lea rdi, [json_out_buf]
-    add rdi, rax
-
-    ; Now rdi is at the current write position in json_out_buf
-    ; Unescape the FIFO message into temp_buf
-    push rdi                ; save json_out_buf position
     mov rsi, r12            ; original FIFO message
     lea rdi, [temp_buf]
     call unescape_fifo_msg
     mov r13, rax            ; unescaped length
-    pop rdi                 ; restore json_out_buf position
+
+    pop rdi                 ; restore json_out_buf write position
 
     ; JSON-escape from temp_buf into json_out_buf
     lea rsi, [temp_buf]
@@ -1155,9 +1105,30 @@ build_json_payload:
     mov byte [rdi], ']'
     inc rdi
 
-    ; Add tools definition: ,"tools":[...]
-    lea rsi, [tools_json]
-    call strcpy_to
+    ; Add tools definition from bridge: ,"tools":
+    mov byte [rdi], ','
+    inc rdi
+    mov byte [rdi], '"'
+    inc rdi
+    mov byte [rdi], 't'
+    inc rdi
+    mov byte [rdi], 'o'
+    inc rdi
+    mov byte [rdi], 'o'
+    inc rdi
+    mov byte [rdi], 'l'
+    inc rdi
+    mov byte [rdi], 's'
+    inc rdi
+    mov byte [rdi], '"'
+    inc rdi
+    mov byte [rdi], ':'
+    inc rdi
+
+    ; Copy tools JSON array verbatim from tools_json_buf
+    lea rsi, [tools_json_buf]
+    mov rcx, [tools_json_len]
+    rep movsb
 
     ; Close root object: }
     mov byte [rdi], '}'
@@ -1191,14 +1162,14 @@ strlen_from_rdi:
     pop rdi
     ret
 
-; --- read_llm_response: read from fifo_llm_res until \n\n ---
+; --- read_brain_response: read from brain_out until \n\n ---
 ; Stores in json_in_buf, returns length in rax
-read_llm_response:
+read_brain_response:
     push rbx
     lea rbx, [json_in_buf]
     xor r8, r8              ; total bytes read
 .rlr_loop:
-    mov rdi, [fd_fifo_llm_res]
+    mov rdi, [fd_brain_out]
     lea rsi, [rbx + r8]
     mov rdx, MAX_JSON_IN - 1
     sub rdx, r8
@@ -1338,6 +1309,36 @@ parse_llm_response:
     inc rsi
     lea rdi, [tool_name_buf]
     call json_extract_string
+
+    ; Extract "input" as raw JSON string into tool_input_buf
+    mov rsi, r14
+    lea rdi, [key_input]
+    call json_find_key_in_object
+    test rax, rax
+    jz .plr_input_empty
+    ; Copy raw JSON value (object) into tool_input_buf
+    mov rsi, rax
+    call skip_ws
+    lea rdi, [tool_input_buf]
+    ; Find end of this JSON value and copy verbatim
+    push rsi                ; save start
+    call json_skip_value
+    mov rcx, rsi            ; end
+    pop rsi                 ; start
+    sub rcx, rsi            ; length
+    push rcx
+    rep movsb
+    mov byte [rdi], 0
+    pop rcx
+    mov [tool_input_len], rcx
+    jmp .plr_input_done
+.plr_input_empty:
+    lea rdi, [tool_input_buf]
+    mov byte [rdi], '{'
+    mov byte [rdi+1], '}'
+    mov byte [rdi+2], 0
+    mov qword [tool_input_len], 2
+.plr_input_done:
 
     ; Return 2 = tool_use
     mov rax, 2
@@ -1810,114 +1811,124 @@ itoa_to:
     pop rbx
     ret
 
-; --- execute_tool: run the requested tool syscall ---
-; Reads tool_name_buf, writes result to tool_result_buf + tool_result_len
-execute_tool:
+; --- discover_tools: ask tools bridge for available tool definitions ---
+; Writes __list_tools__\n to claw_in, reads JSON array from claw_out
+; Stores in tools_json_buf, length in tools_json_len
+discover_tools:
     push rbx
 
-    lea rsi, [tool_name_buf]
-    lea rdi, [tool_get_time]
-    call strcmp
-    test rax, rax
-    jz .et_get_time
+    ; Send discovery command
+    mov rdi, [fd_claw_in]
+    lea rsi, [tools_discovery_cmd]
+    mov rdx, tools_discovery_len
+    call sys_write
 
-    lea rsi, [tool_name_buf]
-    lea rdi, [tool_sys_status]
-    call strcmp
-    test rax, rax
-    jz .et_sys_status
+    ; Open claw_out, read response until \n\n, close
+    lea rdi, [claw_out_path]
+    mov rsi, O_RDONLY
+    call sys_open_file
+    mov [fd_claw_out], rax
+    mov rbx, rax
 
-    ; Unknown tool
-    lea rdi, [tool_result_buf]
-    lea rsi, [unknown_tool_msg]
-    call strcpy_to
-    mov qword [tool_result_len], unknown_tool_len
+    lea rdi, [tools_json_buf]
+    xor r8, r8              ; total bytes
+.dt_read:
+    mov rdi, rbx
+    lea rsi, [tools_json_buf + r8]
+    mov rdx, 4096 - 1
+    sub rdx, r8
+    cmp rdx, 0
+    jle .dt_done
+    call sys_read
+    cmp rax, 0
+    jle .dt_done
+    add r8, rax
+    ; Check for \n\n delimiter
+    cmp r8, 2
+    jl .dt_read
+    lea rdi, [tools_json_buf + r8 - 2]
+    cmp byte [rdi], 10
+    jne .dt_read
+    cmp byte [rdi + 1], 10
+    jne .dt_read
+    sub r8, 2              ; strip delimiter
+.dt_done:
+    ; Null-terminate and save length
+    lea rdi, [tools_json_buf + r8]
+    mov byte [rdi], 0
+    mov [tools_json_len], r8
+
+    ; Close claw_out
+    mov rdi, rbx
+    mov rax, SYS_CLOSE
+    syscall
+
     pop rbx
     ret
 
-.et_get_time:
-    ; clock_gettime(CLOCK_REALTIME=0, &timespec_buf)
-    mov rax, SYS_CLOCK_GETTIME
-    xor rdi, rdi                ; CLOCK_REALTIME = 0
-    lea rsi, [timespec_buf]
+; --- dispatch_tool: send tool call to bridge, get result ---
+; Reads tool_name_buf (+ tool input from LLM response)
+; Sends {name}\t{input_json}\n to claw_in
+; Reads result from claw_out into tool_result_buf
+dispatch_tool:
+    push rbx
+
+    ; Build request in tool_result_buf (reuse as scratch): name\tinput\n
+    lea rdi, [tool_result_buf]
+    lea rsi, [tool_name_buf]
+    call strcpy_to
+    mov byte [rdi], 9       ; \t
+    inc rdi
+    lea rsi, [tool_input_buf]
+    call strcpy_to
+    mov byte [rdi], 10      ; \n
+    inc rdi
+
+    ; Calculate length and send
+    lea rsi, [tool_result_buf]
+    mov rdx, rdi
+    sub rdx, rsi
+    mov rdi, [fd_claw_in]
+    call sys_write
+
+    ; Open claw_out, read result until \n\n, close
+    lea rdi, [claw_out_path]
+    mov rsi, O_RDONLY
+    call sys_open_file
+    mov [fd_claw_out], rax
+    mov rbx, rax
+
+    xor r8, r8              ; total bytes
+.dpt_read:
+    mov rdi, rbx
+    lea rsi, [tool_result_buf + r8]
+    mov rdx, 4096 - 1
+    sub rdx, r8
+    cmp rdx, 0
+    jle .dpt_done
+    call sys_read
+    cmp rax, 0
+    jle .dpt_done
+    add r8, rax
+    ; Check for \n\n
+    cmp r8, 2
+    jl .dpt_read
+    lea rdi, [tool_result_buf + r8 - 2]
+    cmp byte [rdi], 10
+    jne .dpt_read
+    cmp byte [rdi + 1], 10
+    jne .dpt_read
+    sub r8, 2
+.dpt_done:
+    lea rdi, [tool_result_buf + r8]
+    mov byte [rdi], 0
+    mov [tool_result_len], r8
+
+    ; Close claw_out
+    mov rdi, rbx
+    mov rax, SYS_CLOSE
     syscall
 
-    ; Format: "Unix timestamp: <seconds>"
-    lea rdi, [tool_result_buf]
-    lea rsi, [time_prefix]
-    call strcpy_to
-
-    mov rax, [timespec_buf]     ; tv_sec
-    call itoa_to
-
-    mov byte [rdi], 0
-    lea rax, [tool_result_buf]
-    mov rcx, rdi
-    sub rcx, rax
-    mov [tool_result_len], rcx
-    pop rbx
-    ret
-
-.et_sys_status:
-    ; sysinfo(&sysinfo_buf)
-    mov rax, SYS_SYSINFO
-    lea rdi, [sysinfo_buf]
-    syscall
-
-    lea rdi, [tool_result_buf]
-
-    ; "Uptime: "
-    lea rsi, [sysinfo_uptime]
-    call strcpy_to
-    mov rax, [sysinfo_buf]          ; uptime (seconds)
-    call itoa_to
-
-    ; " seconds, Total RAM: "
-    lea rsi, [sysinfo_mem_total]
-    call strcpy_to
-    mov rax, [sysinfo_buf + 32]     ; totalram
-    mov ebx, [sysinfo_buf + 104]  ; mem_unit (zero-extends to rbx)
-    mul rbx                          ; rax = totalram * mem_unit
-    call itoa_to
-
-    ; " bytes, Free RAM: "
-    lea rsi, [sysinfo_mem_free]
-    call strcpy_to
-    mov rax, [sysinfo_buf + 40]     ; freeram
-    mov ebx, [sysinfo_buf + 104]  ; mem_unit (zero-extends to rbx)
-    mul rbx
-    call itoa_to
-
-    ; " bytes, Load (1m): "
-    lea rsi, [sysinfo_load]
-    call strcpy_to
-    mov rax, [sysinfo_buf + 8]      ; loads[0], fixed-point * 65536
-    shr rax, 16                     ; integer part
-    call itoa_to
-    mov byte [rdi], '.'
-    inc rdi
-    mov rax, [sysinfo_buf + 8]
-    and rax, 0xFFFF
-    imul rax, 100
-    shr rax, 16                     ; two decimal digits
-    cmp rax, 10
-    jge .et_no_zero
-    mov byte [rdi], '0'
-    inc rdi
-.et_no_zero:
-    call itoa_to
-
-    ; ", Processes: "
-    lea rsi, [sysinfo_procs]
-    call strcpy_to
-    movzx rax, word [sysinfo_buf + 80]  ; procs
-    call itoa_to
-
-    mov byte [rdi], 0
-    lea rax, [tool_result_buf]
-    mov rcx, rdi
-    sub rcx, rax
-    mov [tool_result_len], rcx
     pop rbx
     ret
 
@@ -1967,9 +1978,30 @@ build_tool_followup_payload:
     mov byte [rdi], ']'
     inc rdi
 
-    ; Tools definition
-    lea rsi, [tools_json]
-    call strcpy_to
+    ; Tools definition from bridge: ,"tools":
+    mov byte [rdi], ','
+    inc rdi
+    mov byte [rdi], '"'
+    inc rdi
+    mov byte [rdi], 't'
+    inc rdi
+    mov byte [rdi], 'o'
+    inc rdi
+    mov byte [rdi], 'o'
+    inc rdi
+    mov byte [rdi], 'l'
+    inc rdi
+    mov byte [rdi], 's'
+    inc rdi
+    mov byte [rdi], '"'
+    inc rdi
+    mov byte [rdi], ':'
+    inc rdi
+
+    ; Copy tools JSON array verbatim
+    lea rsi, [tools_json_buf]
+    mov rcx, [tools_json_len]
+    rep movsb
 
     ; Close root object
     mov byte [rdi], '}'
@@ -2186,7 +2218,7 @@ do_compaction:
     push r12                ; save split point
 
     ; Send compaction request to LLM
-    mov rdi, [fd_fifo_llm_req]
+    mov rdi, [fd_brain_in]
     lea rsi, [json_out_buf]
     pop r12                 ; restore split point
     pop rdx                 ; payload length
@@ -2194,22 +2226,22 @@ do_compaction:
     call sys_write
 
     ; Write \n\n delimiter
-    mov rdi, [fd_fifo_llm_req]
+    mov rdi, [fd_brain_in]
     lea rsi, [json_delim]
     mov rdx, 2
     call sys_write
 
     ; Open fifo_llm_res for compaction response
-    lea rdi, [fifo_llm_res_path]
+    lea rdi, [brain_out_path]
     mov rsi, O_RDONLY
     call sys_open_file
-    mov [fd_fifo_llm_res], rax
+    mov [fd_brain_out], rax
 
     ; Read compaction response
-    call read_llm_response
+    call read_brain_response
 
     ; Close fifo_llm_res
-    mov rdi, [fd_fifo_llm_res]
+    mov rdi, [fd_brain_out]
     mov rax, SYS_CLOSE
     syscall
 

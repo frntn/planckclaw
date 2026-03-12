@@ -1,13 +1,13 @@
 #!/bin/sh
-# bridge_llm.sh — LLM bridge for planckclaw
-# Reads JSON payloads from fifo_llm_req, sends to Anthropic API, returns responses on fifo_llm_res.
+# bridge_brain.sh — LLM brain bridge for planckclaw
+# Reads JSON payloads from brain_in, sends to Anthropic API, returns responses on brain_out.
 # Delimiter: double newline (\n\n)
 
-FIFO_REQ="/tmp/planckclaw/fifo_llm_req"
-FIFO_RES="/tmp/planckclaw/fifo_llm_res"
+FIFO_REQ="/tmp/planckclaw/brain_in"
+FIFO_RES="/tmp/planckclaw/brain_out"
 
 if [ -z "$ANTHROPIC_API_KEY" ]; then
-    echo "bridge_llm: ANTHROPIC_API_KEY not set" >&2
+    echo "bridge_brain: ANTHROPIC_API_KEY not set" >&2
     exit 1
 fi
 
@@ -31,6 +31,9 @@ $line"
         continue
     fi
 
+    # Debug: dump payload
+    printf '%s' "$payload" > /tmp/planckclaw/last_payload.json
+
     # Send to Anthropic API
     response=$(curl -s -w "\n%{http_code}" \
         --max-time 120 \
@@ -42,6 +45,9 @@ $line"
 
     http_code=$(echo "$response" | tail -n1)
     body=$(echo "$response" | sed '$d')
+
+    echo "bridge_brain: HTTP $http_code" >&2
+    [ "$http_code" != "200" ] && echo "bridge_brain: body=$body" >&2
 
     if [ "$http_code" = "200" ] && [ -n "$body" ]; then
         printf '%s\n\n' "$body" > "$FIFO_RES"

@@ -1,10 +1,10 @@
 #!/bin/sh
-# bridge_discord.sh — Discord bridge for planckclaw
+# bridge_discord.sh — Discord interaction bridge for planckclaw
 # Connects to Discord Gateway via websocat, relays messages through FIFOs.
 # Dependencies: websocat, jq, curl
 
-FIFO_IN="/tmp/planckclaw/fifo_in"
-FIFO_OUT="/tmp/planckclaw/fifo_out"
+FIFO_IN="/tmp/planckclaw/interact_in"
+FIFO_OUT="/tmp/planckclaw/interact_out"
 
 if [ -z "$DISCORD_BOT_TOKEN" ]; then
     echo "bridge_discord: DISCORD_BOT_TOKEN not set" >&2
