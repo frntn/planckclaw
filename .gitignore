@@ -1,0 +1,6 @@
+# Generated files
+plankclaw
+plankclaw.o
+config.env
+memory/history.jsonl
+memory/summary.md
