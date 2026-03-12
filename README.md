@@ -30,6 +30,7 @@ The entire runtime fits in ~23 KB. That's the binary, the bridges, the tools, th
 Start with defaults : Anthropic LLM + CLI
 
 ```sh
+git clone https://github.com/frntn/plankclaw.git && cd plankclaw
 ./configure                          # check prerequisites
 make                                 # build the ~7KB binary
 cp config.env.example config.env     # add your Anthropic API key
@@ -46,21 +47,21 @@ You'll need `nasm`, `curl`, `jq`, and `websocat` installed (see [install](#insta
 
 ## what is this
 
-The name comes from the [Planck length](https://en.wikipedia.org/wiki/Planck_length) — the smallest meaningful scale in physics. PlanckClaw is the smallest meaningful AI agent we could build: a return to [the Art of Unix Programming](http://www.catb.org/esr/writings/taoup/html/), where small sharp tools compose through text streams and the [Rule of Least Mechanism](http://www.catb.org/esr/writings/taoup/html/ch01s06.html#id2878263) governs every design decision.
+The name comes from the [Planck length](https://en.wikipedia.org/wiki/Planck_length), the smallest meaningful scale in physics. PlanckClaw is the smallest meaningful AI agent we could build: a return to [the Art of Unix Programming](http://www.catb.org/esr/writings/taoup/html/), where small sharp tools compose through text streams and the [Rule of Least Mechanism](http://www.catb.org/esr/writings/taoup/html/ch01s06.html#id2878263) governs every design decision.
 
-The agent binary does no networking and executes no tools. It is a pure router — the `cat` of AI agents. Read a message from one pipe, ask another pipe what tools exist, build a prompt, write it to a third pipe, parse the response, dispatch tool calls, relay the answer. All of this with raw `read`/`write`/`open`/`close` syscalls. No `malloc`. No `printf`. No libc at all. The binary is fully static and has zero runtime dependencies.
+The agent binary does no networking and executes no tools. It is a pure router (the `cat` of AI agents). Read a message from one pipe, ask another pipe what tools exist, build a prompt, write it to a third pipe, parse the response, dispatch tool calls, relay the answer. All of this with raw `read`/`write`/`open`/`close` syscalls. No `malloc`. No `printf`. No libc at all. The binary is fully static and has zero runtime dependencies.
 
-Everything else is composed around it, the way Ken Thompson intended:
+Everything else is composed around it, the way [Doug McIlroy](https://en.wikipedia.org/wiki/Douglas_McIlroy) intended:
 
-- `bridge_discord.sh` — Discord Gateway via WebSocket. ~180 lines of `sh`.
-- `bridge_cli.sh` — terminal interface. ~40 lines of `sh`.
-- `bridge_brain.sh` — `curl`s the Anthropic API. ~90 lines of `sh`.
-- `bridge_claw.sh` — tool discovery and dispatch. ~50 lines of `sh`.
-- `planckclaw.sh` — creates pipes, starts processes, cleans up. ~90 lines of `sh`.
+- `bridge_discord.sh`: Discord Gateway via WebSocket (~180 lines of `sh`)
+- `bridge_cli.sh`: terminal interface (~40 lines of `sh`)
+- `bridge_brain.sh`: `curl`s the Anthropic API (~90 lines of `sh`)
+- `bridge_claw.sh`: tool discovery and dispatch (~50 lines of `sh`)
+- `planckclaw.sh`: creates pipes, starts processes, cleans up (~90 lines of `sh`)
 
-The total codebase is ~2,800 lines. The compiled binary is 6,832 bytes. It runs in ~200 KB of resident memory. There is no build system beyond a 6-line Makefile. The `./configure` is 30 lines of readable `sh` — not 10,000 lines of autoconf. No `cmake`. No `package.json`. Just `nasm`, `ld`, and `make`.
+The total codebase is ~2,800 lines. The compiled binary is 6,832 bytes. It runs in ~200 KB of resident memory. There is no build system beyond a 6-line Makefile. The `./configure` is 30 lines of readable `sh`, not 10,000 lines of autoconf. No `cmake`. No `package.json`. Just `nasm`, `ld`, and `make`.
 
-The point is not that you should write your agents in assembly. The point is that you *can* — that the core logic of an AI agent (read, think, act, remember, respond) is simple enough to fit in a few kilobytes of machine code. Everything else is ceremony.
+The point is not that you should write your agents in assembly. The point is that you *can*, that the core logic of an AI agent (read, think, act, remember, respond) is simple enough to fit in a few kilobytes of machine code. Everything else is ceremony.
 
 ## architecture
 
@@ -102,7 +103,7 @@ The point is not that you should write your agents in assembly. The point is tha
 
 Four processes, six named pipes. The agent never touches the network. The bridges never touch the state. Clean separation.
 
-- **Agent** (`planckclaw`): the ~7KB binary. Pure router — reads messages, discovers tools, builds API payloads, parses responses, dispatches tool calls, persists history and memory. Written in x86-64 assembly. No networking, no tool execution.
+- **Agent** (`planckclaw`): the ~7KB binary. Pure router: reads messages, discovers tools, builds API payloads, parses responses, dispatches tool calls, persists history and memory. Written in x86-64 assembly. No networking, no tool execution.
 - **Bridge Interact** (`bridge_discord.sh` or `bridge_cli.sh`): swappable. `bridge_discord.sh` connects to Discord via WebSocket. `bridge_cli.sh` provides a terminal interface. Pass as argument to `planckclaw.sh`.
 - **Bridge Brain** (`bridge_brain.sh`): reads JSON payloads from `brain_in`, sends them to the Anthropic Messages API via `curl`, writes responses to `brain_out`. Retries on failure.
 - **Bridge Claw** (`bridge_claw.sh`): scans `claws/*.sh` for tool definitions on `__list_tools__` (builtins, zero fork), dispatches tool calls to matching claw scripts. Hot-reload: add/remove a file, the next message sees the change.
@@ -122,7 +123,7 @@ When the LLM decides it needs information, it returns `stop_reason: "tool_use"` 
 
 ### extensibility
 
-Adding a new tool is simple — drop a file in `claws/`:
+Adding a new tool is simple, just drop a file in `claws/`:
 
 ```sh
 #!/bin/sh
@@ -137,13 +138,13 @@ Make it executable (`chmod +x`) and you're done. The claw bridge scans `claws/*.
 
 ### limitations
 
-The default tools are deliberately minimal. PlanckClaw is a thought experiment, not a framework. But the architecture supports any tool — filesystem access, HTTP requests, command execution — by adding a claw file. The core stays under 8KB. Forever.
+The default tools are deliberately minimal. PlanckClaw is a thought experiment, not a framework. But the architecture supports any tool (filesystem access, HTTP requests, command execution) by adding a claw file. The core stays under 8KB. Forever.
 
 ## memory
 
 The agent maintains three files:
 
-- `memory/soul.md`: system prompt, personality. You write this. The agent reads it on startup and injects it into every API call.
+- `memory/soul.md`: system prompt, personality. You write this; the agent reads it on startup and injects it into every API call.
 - `memory/history.jsonl`: full conversation log, append-only JSONL. One line per message, alternating user/assistant roles.
 - `memory/summary.md`: compacted memory. When history exceeds `HISTORY_MAX` lines (default: 200), the agent sends old conversations to the LLM for summarization, keeps the last `HISTORY_KEEP` lines (default: 40), and stores the summary here. Next conversations include the summary as context.
 
