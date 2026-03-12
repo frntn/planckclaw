@@ -25,8 +25,8 @@ send_loop() {
         channel_id=$(printf '%s' "$line" | cut -f1)
         raw_response=$(printf '%s' "$line" | cut -f2-)
 
-        # Unescape \\n → newline, \\t → tab, \\\\ → backslash
-        response=$(printf '%s' "$raw_response" | sed -e 's/\\\\n/\n/g' -e 's/\\\\t/\t/g' -e 's/\\\\\\\\/\\/g')
+        # Unescape \n → newline, \t → tab, \\ → backslash
+        response=$(printf '%s' "$raw_response" | sed -e 's/\\n/\n/g' -e 's/\\t/\t/g' -e 's/\\\\/\\/g')
 
         # Check length — Discord limit is 2000 chars
         len=$(printf '%s' "$response" | wc -c)
@@ -60,6 +60,8 @@ send_loop() {
 # --- RECEIVE SUBPROCESS: Discord WebSocket → fifo_in ---
 recv_loop() {
     backoff=5
+    ws_send="/tmp/plankclaw/ws_send"
+    ws_recv="/tmp/plankclaw/ws_recv"
 
     while true; do
         # Get gateway URL
@@ -76,8 +78,20 @@ recv_loop() {
 
         last_seq="null"
 
-        # Connect via websocat
-        websocat -t "$gateway_url/?v=10&encoding=json" 2>/dev/null | while IFS= read -r msg; do
+        # Named pipes for bidirectional WebSocket communication
+        mkfifo "$ws_send" 2>/dev/null || true
+        mkfifo "$ws_recv" 2>/dev/null || true
+
+        # Keep ws_send open so websocat doesn't see EOF on stdin
+        sleep 86400 > "$ws_send" &
+        KEEPALIVE_PID=$!
+
+        # Start websocat: reads from ws_send, writes to ws_recv
+        websocat -t "$gateway_url/?v=10&encoding=json" < "$ws_send" > "$ws_recv" 2>/dev/null &
+        WS_PID=$!
+
+        # Read from ws_recv in the current shell (no subshell — variables persist)
+        while IFS= read -r msg; do
             op=$(printf '%s' "$msg" | jq -r '.op // empty')
             t=$(printf '%s' "$msg" | jq -r '.t // empty')
             seq=$(printf '%s' "$msg" | jq -r '.s // empty')
@@ -92,23 +106,24 @@ recv_loop() {
                     # Hello — extract heartbeat interval and send Identify
                     heartbeat_interval=$(printf '%s' "$msg" | jq -r '.d.heartbeat_interval')
 
-                    # Send Identify
-                    printf '{"op":2,"d":{"token":"%s","intents":512,"properties":{"os":"linux","browser":"plankclaw","device":"plankclaw"}}}\n' \
-                        "$DISCORD_BOT_TOKEN"
+                    printf '{"op":2,"d":{"token":"%s","intents":4608,"properties":{"os":"linux","browser":"plankclaw","device":"plankclaw"}}}\n' \
+                        "$DISCORD_BOT_TOKEN" > "$ws_send"
+
+                    echo "bridge_discord: identified, starting heartbeat (${heartbeat_interval}ms)" >&2
 
                     # Start heartbeat in background
                     (
                         hb_interval_sec=$((heartbeat_interval / 1000))
                         while true; do
                             sleep "$hb_interval_sec"
-                            printf '{"op":1,"d":%s}\n' "$last_seq"
+                            printf '{"op":1,"d":%s}\n' "$last_seq" > "$ws_send"
                         done
                     ) &
                     HB_PID=$!
                     ;;
                 1)
                     # Heartbeat request
-                    printf '{"op":1,"d":%s}\n' "$last_seq"
+                    printf '{"op":1,"d":%s}\n' "$last_seq" > "$ws_send"
                     ;;
                 11)
                     # Heartbeat ACK — noop
@@ -130,6 +145,8 @@ recv_loop() {
                             continue
                         fi
 
+                        echo "bridge_discord: message from $msg_channel" >&2
+
                         # Escape newlines and tabs in content
                         escaped_content=$(printf '%s' "$msg_content" | sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' | tr '\n' ' ')
 
@@ -138,10 +155,12 @@ recv_loop() {
                     fi
                     ;;
             esac
-        done
+        done < "$ws_recv"
 
-        # websocat disconnected — kill heartbeat and reconnect
+        # websocat disconnected — clean up
         [ -n "$HB_PID" ] && kill "$HB_PID" 2>/dev/null
+        kill "$WS_PID" "$KEEPALIVE_PID" 2>/dev/null
+        rm -f "$ws_send" "$ws_recv"
         echo "bridge_discord: disconnected, reconnecting in ${backoff}s" >&2
         sleep "$backoff"
         backoff=$((backoff * 2))
