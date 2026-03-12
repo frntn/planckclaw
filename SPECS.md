@@ -14,21 +14,22 @@ existing tools on the host machine.
 
 ## Core Capabilities
 
-  C1 — Receive messages from a human via Discord.
-  C2 — Send a prompt to Anthropic Claude API and receive the response.
-  C3 — Send the LLM response back to Discord.
-  C4 — Maintain persistent memory between sessions: conversation history
+  C1 — Receive messages from a human via an interaction bridge (Discord by default).
+  C2 — Discover available tools dynamically from a claw bridge.
+  C3 — Send a prompt (with tool definitions) to a brain bridge (Anthropic Claude by default).
+  C4 — Dispatch tool calls to the claw bridge, relay results back to the brain.
+  C5 — Send the final response back via the interaction bridge.
+  C6 — Maintain persistent memory between sessions: conversation history
        and an injectable personality/context file.
-  C5 — Run continuously as a long-lived daemon process, listening for
+  C7 — Run continuously as a long-lived daemon process, listening for
        incoming messages.
 
 ## Explicitly Out of Scope (v1)
 
   - No embedded TLS (delegated to environment tools)
-  - No multi-channel (Discord only)
-  - No multi-model (Claude only)
-  - No skills/plugins
-  - No shell command execution
+  - No multi-channel (single interaction bridge)
+  - No hot-reload of bridges (restart to swap)
+  - No multi-bridge of the same type (one interact, one brain, one tools)
   - No cron/webhook triggers (reactive daemon only)
   - No web interface or dashboard
   - No sophisticated error handling (basic retry, clean crash otherwise)
@@ -52,73 +53,85 @@ WebSocket, polling) is delegated to external processes via pipes. The agent
 only: reads, thinks, writes, remembers.
 
 ## Component Diagram
-                                                           
-   ┌──────────────────────────────────────────────────┐    
-   │                   LINUX HOST                     │    
-   │                                                  │    
-   │  ┌───────────┐    FIFOs     ┌─────────────────┐  │    
-   │  │           │              │                 │  │    
-   │  │  BRIDGE   │  ─fifo_in──▶ │  AGENT          │  │    
-   │  │  DISCORD  │              │  (binary ~5KB   │  │    
-   │  │           │  ◀─fifo_out─ │   x86-64 asm)   │  │    
-   │  │ (shell    │              ├─────────────────┤  │    
-   │  │  script)  │              │                 │  │    
-   │  │           │              │  BRIDGE LLM     │  │    
-   │  │           │              │  (shell script) │  │    
-   │  └───┬───▲───┘              └────┬────▲───────┘  │    
-   │      │   │                       │    │          │    
-   │      │   │                       │    │          │    
-   │      │   │              fifo_llm_req fifo_llm_res│    
-   │      │   │                       │    │          │    
-   │      ▼   │                       ▼    │          │    
-   │    Discord API               Anthropic API       │    
-   │  ┌────────────────────────────────────────────┐  │    
-   │  │              FILESYSTEM                    │  │    
-   │  │  memory/history.jsonl  (conversation log)  │  │    
-   │  │  memory/soul.md        (personality/prompt)│  │    
-   │  │  memory/summary.md     (compacted memory)  │  │    
-   │  │  config.env            (API tokens)        │  │    
-   │  └────────────────────────────────────────────┘  │    
-   └──────────────────────────────────────────────────┘    
-                                                           
+
+   ┌──────────────────┐
+   │   Discord API    │
+   └───┬──────────▲───┘
+       │          │
+   ┌───▼──────────┴───┐
+   │  BRIDGE INTERACT │
+   │  (shell script)  │
+   └───┬──────────▲───┘
+       │          │
+  interact_in  interact_out
+       │          │
+   ┌───▼──────────┴───┐              ┌──────────────────┐
+   │      AGENT       ├──────────────►   BRIDGE CLAW   │
+   │   (~7KB x86-64)  ◄──────────────┤  (shell script)  │
+   └───┬──────────▲───┘              └──────────────────┘
+       │          │               claw_in / claw_out
+    brain_in   brain_out
+       │          │
+   ┌───▼──────────┴───┐
+   │   BRIDGE BRAIN   │
+   │  (shell script)  │
+   └───┬──────────▲───┘
+       │          │
+   ┌───▼──────────┴───┐
+   │  Anthropic API   │
+   └──────────────────┘
+
+   FILESYSTEM: memory/soul.md, memory/history.jsonl, memory/summary.md
+
 ## Component Details
 
 ### A — AGENT (x86-64 assembly binary, NASM): "planckclaw"
 
-  The core. The ONLY compiled component. Responsibilities:
-    - Main loop: read incoming message on fifo_in, process, write response on fifo_out
-    - Build JSON payload for Claude API (inject soul.md + recent history + message)
-    - Parse LLM JSON response (extract response text) using a real minimal JSON parser
+  The core. The ONLY compiled component. A pure router. Responsibilities:
+    - Main loop: read interact_in → discover tools → build payload → write brain_in →
+      read brain_out → if tool_use: dispatch to claw bridge → loop → write interact_out
+    - Build JSON payload for LLM (inject soul.md + recent history + message + tools)
+    - Parse LLM JSON response (extract text, detect tool_use) using structural JSON parser
     - Write each exchange to history.jsonl (append-only)
     - Read soul.md at startup and keep in memory
     - Read summary.md at startup and keep in memory
     - Trigger compaction when history exceeds threshold
 
-  What it does NOT do: no networking, no TLS, no HTTP, no WebSocket, no Discord polling.
+  What it does NOT do: no networking, no TLS, no tool execution, no hardcoded tool definitions.
 
-### B — BRIDGE DISCORD (shell script): "bridge_discord.sh"
+### B — BRIDGE INTERACT (shell script): "bridge_discord.sh"
 
-  A shell script (~100 lines) that:
+  A shell script (~180 lines) that:
     - Connects to Discord Gateway via websocat (WebSocket)
     - Handles Identify, Heartbeat, and MESSAGE_CREATE events
     - Extracts message text and channel_id with jq
-    - Writes to fifo_in (format: channel_id\tmessage\n)
-    - Reads from fifo_out and sends responses via Discord REST API with curl
+    - Writes to interact_in (format: channel_id\tmessage\n)
+    - Reads from interact_out and sends responses via Discord REST API with curl
     - Ignores bot messages (prevents loops)
 
-  Dependencies: websocat, jq, curl
+  Dependencies: websocat, jq, curl. Swappable for any other platform.
 
-### C — BRIDGE LLM (shell script): "bridge_llm.sh"
+### C — BRIDGE BRAIN (shell script): "bridge_brain.sh"
 
-  A shell script (~40 lines) that:
-    - Reads complete JSON payload from fifo_llm_req (delimited by \n\n)
+  A shell script (~85 lines) that:
+    - Reads complete JSON payload from brain_in (delimited by \n\n)
     - Sends it to https://api.anthropic.com/v1/messages via curl
-    - Returns raw JSON response on fifo_llm_res (delimited by \n\n)
+    - Returns raw JSON response on brain_out (delimited by \n\n)
     - On failure after retries: returns {"error":"timeout"}\n\n
 
-  Dependencies: curl
+  Dependencies: curl. Swappable for any other LLM provider.
 
-### D — FILESYSTEM (memory persistence)
+### D — BRIDGE CLAW (shell script): "bridge_claw.sh"
+
+  A shell script (~45 lines) that:
+    - On "__list_tools__\n": returns tools JSON array (Claude-compatible) on claw_out
+    - On "{name}\t{input}\n": executes the tool, returns result on claw_out
+    - Default tools: get_time (date +%s), system_status (/proc/*)
+    - Delimiter: \n\n
+
+  Dependencies: none (uses shell builtins and /proc). Extensible by adding case branches.
+
+### E — FILESYSTEM (memory persistence)
 
   Not a software component — a file convention:
     - memory/history.jsonl — One JSON line per message, append-only
@@ -153,14 +166,16 @@ only: reads, thinks, writes, remembers.
 LEVEL 3 — INTERACTIONS
 ================================================================================
 
-## The 4 FIFOs
+## The 6 FIFOs (3 bridge pairs)
 
-    /tmp/planckclaw/fifo_in       Bridge Discord → Agent     (incoming messages)
-    /tmp/planckclaw/fifo_out      Agent → Bridge Discord      (responses)
-    /tmp/planckclaw/fifo_llm_req  Agent → Bridge LLM          (JSON payloads)
-    /tmp/planckclaw/fifo_llm_res  Bridge LLM → Agent          (JSON responses)
+    /tmp/planckclaw/interact_in   Bridge Interact → Agent      (incoming messages)
+    /tmp/planckclaw/interact_out  Agent → Bridge Interact       (responses)
+    /tmp/planckclaw/brain_in      Agent → Bridge Brain           (JSON payloads)
+    /tmp/planckclaw/brain_out     Bridge Brain → Agent           (JSON responses)
+    /tmp/planckclaw/claw_in    Agent → Bridge Claw           (discovery + tool calls)
+    /tmp/planckclaw/claw_out   Bridge Claw → Agent           (tool defs + results)
 
-  All created by the launcher script before starting the three processes.
+  All created by the launcher with umask 077 (owner-only, protects API keys in transit).
 
 ## Main Sequence — A message arrives
 
@@ -338,30 +353,36 @@ LEVEL 4 — CONTRACTS
        - If missing → use hardcoded default: "You are a helpful personal assistant."
     5. Open and read $PLANCKCLAW_DIR/summary.md entirely into memory
        - If missing → empty string
-    6. Open the 4 FIFOs:
-       - /tmp/planckclaw/fifo_in      (O_RDONLY)
-       - /tmp/planckclaw/fifo_out     (O_WRONLY)
-       - /tmp/planckclaw/fifo_llm_req (O_WRONLY)
-       - /tmp/planckclaw/fifo_llm_res (O_RDONLY)
+    6. Open FIFOs:
+       - /tmp/planckclaw/interact_in   (O_RDONLY)
+       - /tmp/planckclaw/interact_out  (O_WRONLY)
+       - /tmp/planckclaw/brain_in      (O_WRONLY)
+       - /tmp/planckclaw/claw_in    (O_WRONLY)
+       - brain_out and claw_out opened on-demand to avoid deadlock
     7. Enter MAIN LOOP
 
   MAIN LOOP (infinite):
-    8.  read() on fifo_in → buffer (blocking)
+    8.  read() on interact_in → buffer (blocking)
     9.  Parse: channel_id, message (separated by \t, terminated by \n)
-    10. Read last HISTORY_KEEP lines from history.jsonl
-    11. Build JSON payload (see payload contract below)
-    12. write() payload to fifo_llm_req, terminated by \n\n
-    13. read() response from fifo_llm_res until \n\n (blocking)
-    14. Parse response JSON using structural JSON parser:
-        navigate to content → array index 0 → "text" field
-        - If "error" field present → response = "I'm temporarily unavailable."
-    15. Append 2 lines to history.jsonl:
-        {"role":"user","content":"..."}
-        {"role":"assistant","content":"..."}
-    16. If line count of history.jsonl > HISTORY_MAX:
-        → Trigger COMPACTION sequence
-    17. write() response to fifo_out: channel_id\tresponse\n
-    18. Go to step 8
+    10. Discovery: write "__list_tools__\n" to claw_in,
+        read tools JSON array from claw_out until \n\n
+    11. Read last HISTORY_KEEP lines from history.jsonl
+    12. Build JSON payload with dynamic tools definitions
+    13. write() payload to brain_in, terminated by \n\n
+    14. read() response from brain_out until \n\n (blocking)
+    15. Parse response JSON:
+        - If stop_reason == "tool_use":
+          a. Extract tool_use_id, name, input from response
+          b. write "{name}\t{input}\n" to claw_in
+          c. read result from claw_out until \n\n
+          d. Build follow-up payload (assistant content + tool_result)
+          e. write to brain_in, read brain_out → loop until text response
+        - If "error" field → response = "I'm temporarily unavailable."
+        - Otherwise → extract content[0].text
+    16. Append 2 lines to history.jsonl
+    17. If line count > HISTORY_MAX → Trigger COMPACTION
+    18. write() response to interact_out: channel_id\tresponse\n
+    19. Go to step 8
 
 ## B — STATIC BUFFERS (constants compiled into binary)
 
@@ -389,7 +410,8 @@ LEVEL 4 — CONTRACTS
     21      sys_access  Check file existence (F_OK)
     60      sys_exit    Termination
 
-  NO fork(). NO exec(). NO mmap(). NO brk(). Zero dynamic allocation.
+  NO fork(). NO exec(). NO mmap(). NO brk(). NO sysinfo(). NO clock_gettime().
+  Zero dynamic allocation. Tool execution is delegated to the claw bridge.
 
 ## D — JSON PAYLOAD: Agent → Bridge LLM (fifo_llm_req)
 
@@ -438,7 +460,7 @@ LEVEL 4 — CONTRACTS
 
 ## F — FIFO FORMATS
 
-  fifo_in and fifo_out (Discord <-> Agent):
+  interact_in and interact_out (Bridge Interact <-> Agent):
 
     {channel_id}\t{text_with_escaped_newlines}\n
 
@@ -450,19 +472,30 @@ LEVEL 4 — CONTRACTS
     Example input:  1234567890123456789\tHello how are you?\n
     Example output: 1234567890123456789\tI'm fine thanks!\\nHow about you?\n
 
-  fifo_llm_req and fifo_llm_res (Agent <-> LLM):
+  brain_in and brain_out (Agent <-> Brain Bridge):
 
     {compact JSON}\n\n
 
     Double newline (\n\n) = message delimiter.
     JSON is always on a single line (compact).
 
-## G — BRIDGE DISCORD: bridge_discord.sh
+  claw_in and claw_out (Agent <-> Tools Bridge):
+
+    Discovery request:   __list_tools__\n
+    Discovery response:  [{tool JSON array}]\n\n
+
+    Tool call request:   {name}\t{input_json}\n
+    Tool call response:  {result_text}\n\n
+
+    The tools JSON array is Claude-compatible and injected verbatim into the
+    brain payload. The agent does not parse or interpret tool definitions.
+
+## G — BRIDGE INTERACT: bridge_discord.sh
 
   Interface:
     Env vars:    DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID
-    FIFO read:   /tmp/planckclaw/fifo_out
-    FIFO write:  /tmp/planckclaw/fifo_in
+    FIFO read:   /tmp/planckclaw/interact_out
+    FIFO write:  /tmp/planckclaw/interact_in
     Network:     wss://gateway.discord.gg (WebSocket via websocat)
                  https://discord.com/api/v10 (REST via curl)
     Dependencies: websocat, jq, curl
@@ -520,46 +553,64 @@ LEVEL 4 — CONTRACTS
       - HTTP 429 (rate limit): read Retry-After header, sleep, retry
       - Other errors: log to stderr, continue
 
-## H — BRIDGE LLM: bridge_llm.sh
+## H — BRIDGE BRAIN: bridge_brain.sh
 
   Interface:
     Env var:     ANTHROPIC_API_KEY
-    FIFO read:   /tmp/planckclaw/fifo_llm_req
-    FIFO write:  /tmp/planckclaw/fifo_llm_res
+    FIFO read:   /tmp/planckclaw/brain_in
+    FIFO write:  /tmp/planckclaw/brain_out
     Dependencies: curl
 
   LOOP:
-    1. Read fifo_llm_req until empty line (\n\n)
+    1. Read brain_in until empty line (\n\n)
        → store in variable $payload
-    2. curl POST https://api.anthropic.com/v1/messages \
-         -H "x-api-key: $ANTHROPIC_API_KEY" \
-         -H "anthropic-version: 2023-06-01" \
-         -H "content-type: application/json" \
-         -d "$payload" \
-         --max-time 120 \
-         --retry 2
+    2. curl POST https://api.anthropic.com/v1/messages
     3. If success (HTTP 200):
-       → write JSON response + \n\n to fifo_llm_res
+       → write JSON response + \n\n to brain_out
     4. If failure after retries:
-       → write {"error":"timeout"}\n\n to fifo_llm_res
+       → write {"error":"timeout"}\n\n to brain_out
     5. Back to 1
+
+## H2 — BRIDGE CLAW: bridge_claw.sh
+
+  Interface:
+    Env vars:    (none required)
+    FIFO read:   /tmp/planckclaw/claw_in
+    FIFO write:  /tmp/planckclaw/claw_out
+    Dependencies: none (shell builtins + /proc)
+
+  LOOP:
+    1. Read claw_in line by line
+    2. If line == "__list_tools__":
+       → write tools JSON array + \n\n to claw_out
+    3. If line == "{name}\t{input}":
+       → execute tool, write result + \n\n to claw_out
+    4. Back to 1
+
+  Default tools:
+    get_time       → date +%s
+    system_status  → /proc/uptime, /proc/meminfo, /proc/loadavg
 
 ## I — LAUNCHER: planckclaw.sh
 
     #!/bin/sh
     . ./config.env
 
+    umask 077
     mkdir -p /tmp/planckclaw memory
-    mkfifo /tmp/planckclaw/fifo_in      2>/dev/null
-    mkfifo /tmp/planckclaw/fifo_out     2>/dev/null
-    mkfifo /tmp/planckclaw/fifo_llm_req 2>/dev/null
-    mkfifo /tmp/planckclaw/fifo_llm_res 2>/dev/null
+    mkfifo /tmp/planckclaw/interact_in
+    mkfifo /tmp/planckclaw/interact_out
+    mkfifo /tmp/planckclaw/brain_in
+    mkfifo /tmp/planckclaw/brain_out
+    mkfifo /tmp/planckclaw/claw_in
+    mkfifo /tmp/planckclaw/claw_out
 
     [ -f memory/soul.md ]       || echo "You are a helpful personal assistant." > memory/soul.md
     [ -f memory/history.jsonl ]  || touch memory/history.jsonl
     [ -f memory/summary.md ]     || touch memory/summary.md
 
-    ./bridge_llm.sh &
+    ./bridge_brain.sh &
+    ./bridge_claw.sh &
     ./planckclaw &
     ./bridge_discord.sh &
 
@@ -602,10 +653,11 @@ LEVEL 4 — CONTRACTS
 
     planckclaw/
     ├── planckclaw.asm          # Agent — x86-64 NASM assembly source
-    ├── Makefile               # nasm + ld → planckclaw binary (~5 KB target)
-    ├── planckclaw.sh           # Launcher
-    ├── bridge_discord.sh      # Bridge Discord (websocat + jq + curl)
-    ├── bridge_llm.sh          # Bridge LLM (curl)
+    ├── Makefile               # nasm + ld → planckclaw binary (~7 KB)
+    ├── planckclaw.sh           # Launcher (6 FIFOs, 4 processes)
+    ├── bridge_discord.sh     # Bridge Interact — Discord (websocat + jq + curl)
+    ├── bridge_brain.sh        # Bridge Brain — Anthropic API (curl)
+    ├── bridge_claw.sh        # Bridge Claw — tool discovery + execution
     ├── config.env.example     # Config template
     ├── memory/
     │   ├── soul.md            # Persistent system prompt
@@ -645,8 +697,9 @@ LEVEL 4 — CONTRACTS
     Component         Requires              Default on Linux?
     ─────────         ────────              ─────────────────
     Agent             nothing (static bin)  N/A — this is our binary
-    Bridge Discord    websocat, jq, curl    curl: yes. jq: usually. websocat: MUST INSTALL
-    Bridge LLM        curl                  yes
+    Bridge Interact   websocat, jq, curl    curl: yes. jq: usually. websocat: MUST INSTALL
+    Bridge Brain      curl                  yes
+    Bridge Claw      nothing (sh + /proc)  yes
     Launcher          sh, mkfifo, mkdir     yes (POSIX)
 
   websocat install: cargo install websocat
@@ -699,22 +752,25 @@ IMPLEMENTATION NOTES FOR CLAUDE CODE
 ================================================================================
 
   PRIORITY ORDER:
-    1. bridge_llm.sh        (simplest, can test API connectivity)
-    2. bridge_discord.sh    (test Discord connectivity)
-    3. planckclaw.asm        (the core challenge)
-    4. planckclaw.sh         (trivial launcher)
-    5. Makefile             (trivial)
-    6. config.env.example   (trivial)
-    7. README.md            (document everything)
+    1. bridge_brain.sh       (simplest, can test API connectivity)
+    2. bridge_claw.sh       (test tool discovery and execution)
+    3. bridge_discord.sh    (test Discord connectivity)
+    4. planckclaw.asm         (the core — pure router)
+    5. planckclaw.sh          (launcher with 6 FIFOs)
+    6. Makefile              (trivial)
+    7. config.env.example    (trivial)
+    8. README.md             (document everything)
 
   TESTING STRATEGY:
-    - Test bridge_llm.sh independently:
-        echo '{"model":"claude-haiku-4-5-20241022","max_tokens":64,"messages":[{"role":"user","content":"Say hello"}]}' > /tmp/planckclaw/fifo_llm_req
-      and read from fifo_llm_res
-    - Test agent independently by piping text to fifo_in manually
-      and reading from fifo_out, with bridge_llm.sh running
-    - Test bridge_discord.sh independently by monitoring fifo_in output
-      when sending a message in the Discord channel
+    - Test bridge_brain.sh independently:
+        echo '{"model":"claude-haiku-4-5-20251001","max_tokens":64,"messages":[{"role":"user","content":"Say hello"}]}' > /tmp/planckclaw/brain_in
+      and read from brain_out
+    - Test bridge_claw.sh independently:
+        echo '__list_tools__' > /tmp/planckclaw/claw_in
+      and read from claw_out
+    - Test agent independently by piping text to interact_in manually
+      and reading from interact_out, with both bridges running
+    - Test bridge_discord.sh independently by monitoring interact_in output
 
   ASM TIPS:
     - Use section .bss for all buffers (zero binary cost)

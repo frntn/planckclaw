@@ -6,8 +6,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/x86--64-assembly-blue" alt="x86-64 assembly">
-  <img src="https://img.shields.io/badge/binary-7,008_bytes-green" alt="7,008 bytes">
-  <img src="https://img.shields.io/badge/total_runtime-19_KB-green" alt="19 KB total">
+  <img src="https://img.shields.io/badge/binary-6,880_bytes-green" alt="6,880 bytes">
+  <img src="https://img.shields.io/badge/total_runtime-20_KB-green" alt="20 KB total">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="zero dependencies">
   <img src="https://img.shields.io/badge/platform-Linux_only-orange" alt="Linux only">
   <img src="https://img.shields.io/badge/license-public_domain-lightgrey" alt="public domain">
@@ -15,9 +15,9 @@
 
 An AI agent in ~7 KB of x86-64 assembly. No libc, no runtime, no allocator. Just Linux syscalls.
 
-PlanckClaw is an autonomous agent that listens on Discord, talks to the Claude API, uses tools, and remembers things between sessions. It's not a chatbot — it's a real agent. When you ask it for the time or system status, it executes Linux syscalls (`clock_gettime`, `sysinfo`) and feeds the results back to the LLM through Claude's [tool use](https://docs.anthropic.com/en/docs/build-with-claude/tool-use) protocol. The core is a static binary compiled from ~2,300 lines of NASM assembly. It does zero networking; that part is delegated to shell scripts and standard Unix tools (`curl`, `websocat`, `jq`), composed through named pipes. Three processes, four FIFOs, one agent. That's it.
+PlanckClaw is an autonomous agent that communicates through three bridges: one for user interaction (Discord), one for thinking (Claude API), and one for acting (tools). The core is a pure router — it doesn't know which platform it talks to, which LLM it uses, or which tools it has. All three bridges are swappable shell scripts connected via named pipes. Four processes, six FIFOs, one agent. That's it.
 
-The entire runtime footprint (binary, shell scripts, config, soul file) is ~19 KB. That's the whole agent. It fits on a 1.44 MB floppy disk about 75 times.
+The entire runtime footprint (binary, shell scripts, config, soul file) is ~20 KB. That's the whole agent. It fits on a 1.44 MB floppy disk about 72 times.
 
 Modern AI agent frameworks ship hundreds of megabytes of runtimes, package managers, and abstraction layers before a single token is generated. LangChain alone pulls in 400+ transitive dependencies. PlanckClaw asks: what if we stripped all of that away? What's the smallest thing that can still act?
 
@@ -28,74 +28,107 @@ Modern AI agent frameworks ship hundreds of megabytes of runtimes, package manag
 ```sh
 make                          # build the ~7KB binary
 cp config.env.example config.env
-# edit config.env → add your Discord bot token, channel ID, Anthropic API key
-./planckclaw.sh               # run
+# edit config.env → add your Anthropic API key (Discord tokens optional for CLI mode)
+./planckclaw.sh ./bridge_cli.sh   # run in terminal mode
 ```
 
-You'll need `nasm`, `curl`, `jq`, and `websocat` installed (see [install](#install) below). Send a message to your bot on Discord. It answers. It remembers.
+Type a message, get a response. No Discord, no websocat, just `curl` and an Anthropic API key.
+
+For Discord mode:
+
+```sh
+# add Discord bot token and channel ID to config.env
+./planckclaw.sh               # defaults to bridge_discord.sh
+```
+
+You'll need `nasm`, `curl`, `jq`, and `websocat` installed (see [install](#install) below).
 
 ## what is this
 
 This is a thought experiment. A deliberate return to the Unix philosophy: do one thing, and do it well. The name comes from the [Planck length](https://en.wikipedia.org/wiki/Planck_length), the smallest meaningful scale in physics. PlanckClaw is the smallest meaningful AI agent we could build.
 
-The agent binary does no networking. It reads from a pipe, writes to a pipe, and persists state to files. It builds JSON payloads for the Claude API by hand (no JSON library, just `stosb` and careful quoting). It parses API responses with a structural JSON walker written in x86-64. It escapes strings, manages conversation history, triggers memory compaction when history grows too long, and writes responses back out. When the LLM requests a tool call, the agent detects `stop_reason: "tool_use"`, executes the corresponding syscall, and sends the result back for a follow-up response — the full client-side tool execution loop, in assembly. All of this with raw `read`/`write`/`open`/`close`/`clock_gettime`/`sysinfo` syscalls. No malloc. No printf. No libc at all. The binary is fully static and has zero runtime dependencies.
+The agent binary does no networking and executes no tools. It is a pure router: read a message from the interaction bridge, ask the claw bridge what capabilities are available, build a prompt, send it to the brain bridge, parse the response, dispatch tool calls back to the claw bridge, and relay the final answer. All of this with raw `read`/`write`/`open`/`close` syscalls. No malloc. No printf. No libc at all. The binary is fully static and has zero runtime dependencies.
 
 Everything else is composed around it:
 
 - `bridge_discord.sh` connects to the Discord Gateway via WebSocket, relays messages through FIFOs. ~180 lines of shell.
-- `bridge_llm.sh` takes JSON payloads from a FIFO, `curl`s the Anthropic API, writes responses back. ~85 lines of shell.
-- `planckclaw.sh` creates pipes, starts all three processes, cleans up on exit. ~75 lines of shell.
+- `bridge_brain.sh` takes JSON payloads from a FIFO, `curl`s the Anthropic API, writes responses back. ~85 lines of shell.
+- `bridge_claw.sh` scans `claws/*.sh` for tool definitions (builtins, zero fork) and dispatches tool calls to the matching claw. ~50 lines of shell.
+- `planckclaw.sh` creates pipes, starts all four processes, cleans up on exit. ~75 lines of shell.
 
-The total codebase is ~2,700 lines. The compiled binary is 7,008 bytes. It runs in ~200KB of RAM (mostly BSS buffers). There is no build system beyond a 6-line Makefile. There are no dependencies beyond what's already on your Linux box (plus `websocat`).
+The total codebase is ~2,800 lines. The compiled binary is 6,880 bytes. It runs in ~200KB of RAM (mostly BSS buffers). There is no build system beyond a 6-line Makefile. There are no dependencies beyond what's already on your Linux box (plus `websocat`).
 
 The point is not that you should write your agents in assembly. The point is that you *can*, that the core logic of an AI agent (read, think, act, remember, respond) is simple enough to fit in a few kilobytes of machine code. Everything else is ceremony.
 
 ## architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   LINUX HOST                        │
-│                                                     │
-│  ┌───────────┐    FIFOs    ┌──────────────────┐     │
-│  │           │ ─fifo_in──▶ │                  │     │
-│  │  BRIDGE   │             │   AGENT           │     │
-│  │  DISCORD  │ ◀─fifo_out─ │   (binary ~7KB  │     │
-│  │           │             │    x86-64 asm)   │     │
-│  │ (shell    │             ├──────────────────┤     │
-│  │  script)  │             │                  │     │
-│  │           │             │   BRIDGE LLM     │     │
-│  └───────────┘             │   (shell script) │     │
-│       │  ▲                 └──┬────────▲──────┘     │
-│       │  │                    │        │            │
-│       ▼  │             fifo_llm_req  fifo_llm_res  │
-│   Discord API              │        │              │
-│   (WebSocket + REST)       ▼        │              │
-│                        Anthropic API               │
-└─────────────────────────────────────────────────────┘
+   ┌──────────────────┐
+   │   Discord API    │
+   └───┬──────────▲───┘
+       │          │
+   ┌───▼──────────┴───┐
+   │  BRIDGE INTERACT │
+   │  (shell script)  │
+   └───┬──────────▲───┘
+       │          │
+  interact_in  interact_out
+       │          │
+   ┌───▼──────────┴───┐              ┌──────────────────┐
+   │      AGENT       ├──────────────►   BRIDGE CLAW   │
+   │   (~7KB x86-64)  ◄──────────────┤  (shell script)  │
+   └───┬──────────▲───┘              └──────────────────┘
+       │          │               claw_in / claw_out
+    brain_in   brain_out
+       │          │
+   ┌───▼──────────┴───┐
+   │   BRIDGE BRAIN   │
+   │  (shell script)  │
+   └───┬──────────▲───┘
+       │          │
+   ┌───▼──────────┴───┐
+   │  Anthropic API   │
+   └──────────────────┘
 ```
 
-Three processes, four named pipes. The agent never touches the network. The bridges never touch the state. Clean separation.
+Four processes, six named pipes. The agent never touches the network. The bridges never touch the state. Clean separation.
 
-- **Agent** (`planckclaw`): the ~7KB binary. Reads messages, builds API payloads, parses responses, executes tools, persists history and memory. Written in x86-64 assembly. No networking.
-- **Bridge Discord** (`bridge_discord.sh`): connects to the Discord Gateway via WebSocket (`websocat`), relays user messages into `fifo_in`, sends agent responses from `fifo_out` to Discord via REST API.
-- **Bridge LLM** (`bridge_llm.sh`): reads JSON payloads from `fifo_llm_req`, sends them to the Anthropic Messages API via `curl`, writes responses to `fifo_llm_res`. Retries on failure.
+- **Agent** (`planckclaw`): the ~7KB binary. Pure router — reads messages, discovers tools, builds API payloads, parses responses, dispatches tool calls, persists history and memory. Written in x86-64 assembly. No networking, no tool execution.
+- **Bridge Interact** (`bridge_discord.sh` or `bridge_cli.sh`): swappable. `bridge_discord.sh` connects to Discord via WebSocket. `bridge_cli.sh` provides a terminal interface. Pass as argument to `planckclaw.sh`.
+- **Bridge Brain** (`bridge_brain.sh`): reads JSON payloads from `brain_in`, sends them to the Anthropic Messages API via `curl`, writes responses to `brain_out`. Retries on failure.
+- **Bridge Claw** (`bridge_claw.sh`): scans `claws/*.sh` for tool definitions on `__list_tools__` (builtins, zero fork), dispatches tool calls to matching claw scripts. Hot-reload: add/remove a file, the next message sees the change.
 
 ## tools
 
-What makes PlanckClaw an *agent* rather than a chatbot is tool use. The agent registers two tools with the Claude API using the standard [tool use](https://docs.anthropic.com/en/docs/build-with-claude/tool-use) protocol:
+What makes PlanckClaw an *agent* rather than a chatbot is tool use. At each message, the agent asks the claw bridge for available tools via the `__list_tools__` discovery protocol and injects them into the Claude API request using the standard [tool use](https://docs.anthropic.com/en/docs/build-with-claude/tool-use) protocol.
 
-| Tool | Syscall | What it returns |
+PlanckClaw ships with two default claws in the `claws/` directory:
+
+| Tool | Claw file | What it returns |
 |---|---|---|
-| `get_time` | `clock_gettime(CLOCK_REALTIME)` | Current Unix timestamp |
-| `system_status` | `sysinfo()` | Uptime, RAM total/free, 1-min load average, process count |
+| `get_time` | `claws/time.sh` | Current Unix timestamp |
+| `system_status` | `claws/system.sh` | Uptime, RAM total/free, 1-min load average, process count |
 
-When the LLM decides it needs information, it returns `stop_reason: "tool_use"` instead of text. The agent detects this, executes the corresponding Linux syscall, formats the result, and sends it back in a `tool_result` message. The LLM then generates its final response using the real data.
+When the LLM decides it needs information, it returns `stop_reason: "tool_use"` instead of text. The agent detects this, dispatches the call to the claw bridge via FIFO, and sends the result back in a `tool_result` message. The LLM then generates its final response using the real data.
 
-The full loop — detect tool call, execute syscall, format result, re-send to API, parse final response — runs entirely in the ~7KB binary. No shell, no subprocess, no library. Just `syscall` instructions.
+### extensibility
+
+Adding a new tool is simple — drop a file in `claws/`:
+
+```sh
+#!/bin/sh
+#TOOLS:{"name":"my_tool","description":"What it does","input_schema":{"type":"object","properties":{}}}
+
+case "$1" in
+    my_tool) printf 'result here' ;;
+esac
+```
+
+Make it executable (`chmod +x`) and you're done. The claw bridge scans `claws/*.sh` at each message using shell builtins (zero fork for discovery). No recompilation, no config file, no restart needed — hot-reload is built in.
 
 ### limitations
 
-These two tools are deliberately minimal. PlanckClaw is a thought experiment, not a framework. It doesn't have filesystem access, HTTP capabilities, or command execution — and that's by design. The point is to prove that the complete tool use protocol (request → detect → execute → respond) fits in a few kilobytes of machine code.
+The default tools are deliberately minimal. PlanckClaw is a thought experiment, not a framework. But the architecture supports any tool — filesystem access, HTTP requests, command execution — by adding a claw file. The core stays under 8KB. Forever.
 
 ## memory
 
@@ -113,8 +146,8 @@ Environment variables in `config.env`:
 
 | Variable | Description | Default |
 |---|---|---|
-| `DISCORD_BOT_TOKEN` | Discord bot token | (required) |
-| `DISCORD_CHANNEL_ID` | Channel to listen on | (required) |
+| `DISCORD_BOT_TOKEN` | Discord bot token | (required for Discord) |
+| `DISCORD_CHANNEL_ID` | Channel to listen on | (required for Discord) |
 | `ANTHROPIC_API_KEY` | Anthropic API key | (required) |
 | `PLANCKCLAW_DIR` | Memory directory | `./memory` |
 | `HISTORY_MAX` | Lines before compaction | `200` |
@@ -146,9 +179,14 @@ planckclaw/
 ├── planckclaw.asm         # the agent, ~2,300 lines of x86-64 NASM
 ├── Makefile               # nasm + ld → ~7KB binary
 ├── planckclaw.sh          # launcher, starts everything, cleans up on exit
-├── bridge_discord.sh      # Discord ↔ FIFO bridge
-├── bridge_llm.sh          # FIFO ↔ Anthropic API bridge
+├── bridge_discord.sh     # Discord ↔ FIFO interaction bridge
+├── bridge_cli.sh          # Terminal ↔ FIFO interaction bridge
+├── bridge_brain.sh        # FIFO ↔ Anthropic API brain bridge
+├── bridge_claw.sh         # FIFO ↔ claw router (discovery + dispatch)
 ├── config.env.example     # config template
+├── claws/
+│   ├── time.sh            # claw: get_time
+│   └── system.sh          # claw: system_status
 └── memory/
     ├── soul.md            # who the agent is (you write this)
     ├── history.jsonl      # conversation log (auto-generated)
