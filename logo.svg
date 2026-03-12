@@ -47,5 +47,5 @@
   <text x="100" y="125" fill="#7d8590" font-family="'JetBrains Mono', 'Courier New', monospace" font-size="16">the smallest thing that can still think</text>
   <!-- Binary size callout -->
   <rect x="612" y="38" width="148" height="32" rx="4" fill="none" stroke="#30363d" stroke-width="1"/>
-  <text x="686" y="59" fill="#3fb950" font-family="'JetBrains Mono', 'Courier New', monospace" font-size="14" text-anchor="middle">7,008 bytes</text>
+  <text x="686" y="59" fill="#3fb950" font-family="'JetBrains Mono', 'Courier New', monospace" font-size="14" text-anchor="middle">6,832 bytes</text>
 </svg>
