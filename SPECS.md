@@ -1,4 +1,4 @@
-# PLANKCLAW — Design Specification for Claude Code
+# PLANCKCLAW — Design Specification for Claude Code
 # The smallest possible functional AI agent on Linux x86-64
 # NO CODE UNTIL YOU HAVE READ AND UNDERSTOOD THIS ENTIRE DOCUMENT.
 
@@ -6,7 +6,7 @@
 LEVEL 1 — CAPABILITIES
 ================================================================================
 
-## Project Name: plankclaw
+## Project Name: planckclaw
 
 ## Founding Constraint
 Smallest possible autonomous AI agent binary on Linux x86-64. Target: < 8 KB.
@@ -84,7 +84,7 @@ only: reads, thinks, writes, remembers.
                                                            
 ## Component Details
 
-### A — AGENT (x86-64 assembly binary, NASM): "plankclaw"
+### A — AGENT (x86-64 assembly binary, NASM): "planckclaw"
 
   The core. The ONLY compiled component. Responsibilities:
     - Main loop: read incoming message on fifo_in, process, write response on fifo_out
@@ -156,10 +156,10 @@ LEVEL 3 — INTERACTIONS
 
 ## The 4 FIFOs
 
-    /tmp/plankclaw/fifo_in       Bridge Discord → Agent     (incoming messages)
-    /tmp/plankclaw/fifo_out      Agent → Bridge Discord      (responses)
-    /tmp/plankclaw/fifo_llm_req  Agent → Bridge LLM          (JSON payloads)
-    /tmp/plankclaw/fifo_llm_res  Bridge LLM → Agent          (JSON responses)
+    /tmp/planckclaw/fifo_in       Bridge Discord → Agent     (incoming messages)
+    /tmp/planckclaw/fifo_out      Agent → Bridge Discord      (responses)
+    /tmp/planckclaw/fifo_llm_req  Agent → Bridge LLM          (JSON payloads)
+    /tmp/planckclaw/fifo_llm_res  Bridge LLM → Agent          (JSON responses)
 
   All created by the launcher script before starting the three processes.
 
@@ -329,21 +329,21 @@ LEVEL 3 — INTERACTIONS
 LEVEL 4 — CONTRACTS
 ================================================================================
 
-## A — AGENT LIFECYCLE (plankclaw, x86-64 asm binary)
+## A — AGENT LIFECYCLE (planckclaw, x86-64 asm binary)
 
   STARTUP:
-    1. Read env var PLANKCLAW_DIR (default: "./memory")
+    1. Read env var PLANCKCLAW_DIR (default: "./memory")
     2. Read env var HISTORY_MAX (default: "200")
     3. Read env var HISTORY_KEEP (default: "40")
-    4. Open and read $PLANKCLAW_DIR/soul.md entirely into memory
+    4. Open and read $PLANCKCLAW_DIR/soul.md entirely into memory
        - If missing → use hardcoded default: "You are a helpful personal assistant."
-    5. Open and read $PLANKCLAW_DIR/summary.md entirely into memory
+    5. Open and read $PLANCKCLAW_DIR/summary.md entirely into memory
        - If missing → empty string
     6. Open the 4 FIFOs:
-       - /tmp/plankclaw/fifo_in      (O_RDONLY)
-       - /tmp/plankclaw/fifo_out     (O_WRONLY)
-       - /tmp/plankclaw/fifo_llm_req (O_WRONLY)
-       - /tmp/plankclaw/fifo_llm_res (O_RDONLY)
+       - /tmp/planckclaw/fifo_in      (O_RDONLY)
+       - /tmp/planckclaw/fifo_out     (O_WRONLY)
+       - /tmp/planckclaw/fifo_llm_req (O_WRONLY)
+       - /tmp/planckclaw/fifo_llm_res (O_RDONLY)
     7. Enter MAIN LOOP
 
   MAIN LOOP (infinite):
@@ -462,8 +462,8 @@ LEVEL 4 — CONTRACTS
 
   Interface:
     Env vars:    DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID
-    FIFO read:   /tmp/plankclaw/fifo_out
-    FIFO write:  /tmp/plankclaw/fifo_in
+    FIFO read:   /tmp/planckclaw/fifo_out
+    FIFO write:  /tmp/planckclaw/fifo_in
     Network:     wss://gateway.discord.gg (WebSocket via websocat)
                  https://discord.com/api/v10 (REST via curl)
     Dependencies: websocat, jq, curl
@@ -479,7 +479,7 @@ LEVEL 4 — CONTRACTS
       3. On receiving opcode 10 (Hello):
          → extract heartbeat_interval from d.heartbeat_interval
       4. Send Identify payload:
-         {"op":2,"d":{"token":"$TOKEN","intents":512,"properties":{"os":"linux","browser":"plankclaw","device":"plankclaw"}}}
+         {"op":2,"d":{"token":"$TOKEN","intents":512,"properties":{"os":"linux","browser":"planckclaw","device":"planckclaw"}}}
          (intents 512 = GUILD_MESSAGES, bit 9)
 
     LOOP:
@@ -525,8 +525,8 @@ LEVEL 4 — CONTRACTS
 
   Interface:
     Env var:     ANTHROPIC_API_KEY
-    FIFO read:   /tmp/plankclaw/fifo_llm_req
-    FIFO write:  /tmp/plankclaw/fifo_llm_res
+    FIFO read:   /tmp/planckclaw/fifo_llm_req
+    FIFO write:  /tmp/planckclaw/fifo_llm_res
     Dependencies: curl
 
   LOOP:
@@ -545,23 +545,23 @@ LEVEL 4 — CONTRACTS
        → write {"error":"timeout"}\n\n to fifo_llm_res
     5. Back to 1
 
-## I — LAUNCHER: plankclaw.sh
+## I — LAUNCHER: planckclaw.sh
 
     #!/bin/sh
     . ./config.env
 
-    mkdir -p /tmp/plankclaw memory
-    mkfifo /tmp/plankclaw/fifo_in      2>/dev/null
-    mkfifo /tmp/plankclaw/fifo_out     2>/dev/null
-    mkfifo /tmp/plankclaw/fifo_llm_req 2>/dev/null
-    mkfifo /tmp/plankclaw/fifo_llm_res 2>/dev/null
+    mkdir -p /tmp/planckclaw memory
+    mkfifo /tmp/planckclaw/fifo_in      2>/dev/null
+    mkfifo /tmp/planckclaw/fifo_out     2>/dev/null
+    mkfifo /tmp/planckclaw/fifo_llm_req 2>/dev/null
+    mkfifo /tmp/planckclaw/fifo_llm_res 2>/dev/null
 
     [ -f memory/soul.md ]       || echo "You are a helpful personal assistant." > memory/soul.md
     [ -f memory/history.jsonl ]  || touch memory/history.jsonl
     [ -f memory/summary.md ]     || touch memory/summary.md
 
     ./bridge_llm.sh &
-    ./plankclaw &
+    ./planckclaw &
     ./bridge_discord.sh &
 
     wait
@@ -571,7 +571,7 @@ LEVEL 4 — CONTRACTS
     export DISCORD_BOT_TOKEN="MTI3..."
     export DISCORD_CHANNEL_ID="1234567890123456789"
     export ANTHROPIC_API_KEY="sk-ant-..."
-    export PLANKCLAW_DIR="./memory"
+    export PLANCKCLAW_DIR="./memory"
     export HISTORY_MAX="200"
     export HISTORY_KEEP="40"
 
@@ -590,7 +590,7 @@ LEVEL 4 — CONTRACTS
     The user's name is Marc. He works in tech.
     He is interested in minimalist AI agents and x86-64 assembly.
     He prefers responses in French, concise.
-    Current project: building the smallest possible AI agent (plankclaw).
+    Current project: building the smallest possible AI agent (planckclaw).
 
   memory/history.jsonl — One JSON object per line. Always in user/assistant pairs.
 
@@ -601,10 +601,10 @@ LEVEL 4 — CONTRACTS
 
 ## L — FILE TREE
 
-    plankclaw/
-    ├── plankclaw.asm          # Agent — x86-64 NASM assembly source
-    ├── Makefile               # nasm + ld → plankclaw binary (~5 KB target)
-    ├── plankclaw.sh           # Launcher
+    planckclaw/
+    ├── planckclaw.asm          # Agent — x86-64 NASM assembly source
+    ├── Makefile               # nasm + ld → planckclaw binary (~5 KB target)
+    ├── planckclaw.sh           # Launcher
     ├── bridge_discord.sh      # Bridge Discord (websocat + jq + curl)
     ├── bridge_llm.sh          # Bridge LLM (curl)
     ├── config.env.example     # Config template
@@ -618,14 +618,14 @@ LEVEL 4 — CONTRACTS
 
     ASM      = nasm
     LDFLAGS  = -s -n
-    TARGET   = plankclaw
+    TARGET   = planckclaw
 
     all: $(TARGET)
 
-    $(TARGET): plankclaw.o
+    $(TARGET): planckclaw.o
     	ld $(LDFLAGS) -o $@ $
 
-    plankclaw.o: plankclaw.asm
+    planckclaw.o: planckclaw.asm
     	$(ASM) -f elf64 -o $@ $
 
     size: $(TARGET)
@@ -633,7 +633,7 @@ LEVEL 4 — CONTRACTS
     	size $(TARGET)
 
     clean:
-    	rm -f plankclaw.o $(TARGET)
+    	rm -f planckclaw.o $(TARGET)
 
     .PHONY: all size clean
 
@@ -702,15 +702,15 @@ IMPLEMENTATION NOTES FOR CLAUDE CODE
   PRIORITY ORDER:
     1. bridge_llm.sh        (simplest, can test API connectivity)
     2. bridge_discord.sh    (test Discord connectivity)
-    3. plankclaw.asm        (the core challenge)
-    4. plankclaw.sh         (trivial launcher)
+    3. planckclaw.asm        (the core challenge)
+    4. planckclaw.sh         (trivial launcher)
     5. Makefile             (trivial)
     6. config.env.example   (trivial)
     7. README.md            (document everything)
 
   TESTING STRATEGY:
     - Test bridge_llm.sh independently:
-        echo '{"model":"claude-haiku-4-5-20241022","max_tokens":64,"messages":[{"role":"user","content":"Say hello"}]}' > /tmp/plankclaw/fifo_llm_req
+        echo '{"model":"claude-haiku-4-5-20241022","max_tokens":64,"messages":[{"role":"user","content":"Say hello"}]}' > /tmp/planckclaw/fifo_llm_req
       and read from fifo_llm_res
     - Test agent independently by piping text to fifo_in manually
       and reading from fifo_out, with bridge_llm.sh running

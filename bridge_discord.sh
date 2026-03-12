@@ -1,10 +1,10 @@
 #!/bin/sh
-# bridge_discord.sh — Discord bridge for plankclaw
+# bridge_discord.sh — Discord bridge for planckclaw
 # Connects to Discord Gateway via websocat, relays messages through FIFOs.
 # Dependencies: websocat, jq, curl
 
-FIFO_IN="/tmp/plankclaw/fifo_in"
-FIFO_OUT="/tmp/plankclaw/fifo_out"
+FIFO_IN="/tmp/planckclaw/fifo_in"
+FIFO_OUT="/tmp/planckclaw/fifo_out"
 
 if [ -z "$DISCORD_BOT_TOKEN" ]; then
     echo "bridge_discord: DISCORD_BOT_TOKEN not set" >&2
@@ -60,8 +60,8 @@ send_loop() {
 # --- RECEIVE SUBPROCESS: Discord WebSocket → fifo_in ---
 recv_loop() {
     backoff=5
-    ws_send="/tmp/plankclaw/ws_send"
-    ws_recv="/tmp/plankclaw/ws_recv"
+    ws_send="/tmp/planckclaw/ws_send"
+    ws_recv="/tmp/planckclaw/ws_recv"
 
     while true; do
         # Get gateway URL
@@ -106,7 +106,7 @@ recv_loop() {
                     # Hello — extract heartbeat interval and send Identify
                     heartbeat_interval=$(printf '%s' "$msg" | jq -r '.d.heartbeat_interval')
 
-                    printf '{"op":2,"d":{"token":"%s","intents":4608,"properties":{"os":"linux","browser":"plankclaw","device":"plankclaw"}}}\n' \
+                    printf '{"op":2,"d":{"token":"%s","intents":4608,"properties":{"os":"linux","browser":"planckclaw","device":"planckclaw"}}}\n' \
                         "$DISCORD_BOT_TOKEN" > "$ws_send"
 
                     echo "bridge_discord: identified, starting heartbeat (${heartbeat_interval}ms)" >&2

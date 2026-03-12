@@ -1,12 +1,27 @@
-# plankclaw
+# PlanckClaw
+
+<p align="center">
+  <img src="logo.svg" alt="PlanckClaw" width="600">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/x86--64-assembly-blue" alt="x86-64 assembly">
+  <img src="https://img.shields.io/badge/binary-5,408_bytes-green" alt="5,408 bytes">
+  <img src="https://img.shields.io/badge/total_runtime-17_KB-green" alt="17 KB total">
+  <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="zero dependencies">
+  <img src="https://img.shields.io/badge/platform-Linux_only-orange" alt="Linux only">
+  <img src="https://img.shields.io/badge/license-public_domain-lightgrey" alt="public domain">
+</p>
 
 An AI agent in 5,408 bytes of x86-64 assembly. No libc, no runtime, no allocator. Just Linux syscalls.
 
-plankclaw is an autonomous agent that listens on Discord, talks to the Claude API, and remembers things between sessions. The core is a static binary compiled from ~1,800 lines of NASM assembly. It does zero networking; that part is delegated to shell scripts and standard Unix tools (`curl`, `websocat`, `jq`), composed through named pipes. Three processes, four FIFOs, one agent. That's it.
+PlanckClaw is an autonomous agent that listens on Discord, talks to the Claude API, and remembers things between sessions. The core is a static binary compiled from ~1,800 lines of NASM assembly. It does zero networking; that part is delegated to shell scripts and standard Unix tools (`curl`, `websocat`, `jq`), composed through named pipes. Three processes, four FIFOs, one agent. That's it.
 
 The entire runtime footprint (binary, shell scripts, config, soul file) is 17 KB. That's the whole agent. It fits on a 1.44 MB floppy disk about 85 times.
 
-Modern AI agent frameworks ship hundreds of megabytes of runtimes, package managers, and abstraction layers before a single token is generated. LangChain alone pulls in 400+ transitive dependencies. plankclaw asks: what if we stripped all of that away? What's the smallest thing that can still think?
+Modern AI agent frameworks ship hundreds of megabytes of runtimes, package managers, and abstraction layers before a single token is generated. LangChain alone pulls in 400+ transitive dependencies. PlanckClaw asks: what if we stripped all of that away? What's the smallest thing that can still think?
+
+***This is a thought experiment, not production-ready software.***
 
 ## quick start
 
@@ -14,14 +29,14 @@ Modern AI agent frameworks ship hundreds of megabytes of runtimes, package manag
 make                          # build the 5KB binary
 cp config.env.example config.env
 # edit config.env → add your Discord bot token, channel ID, Anthropic API key
-./plankclaw.sh                # run
+./planckclaw.sh               # run
 ```
 
 You'll need `nasm`, `curl`, `jq`, and `websocat` installed (see [install](#install) below). Send a message to your bot on Discord. It answers. It remembers.
 
 ## what is this
 
-This is a style exercise. A deliberate return to the Unix philosophy: do one thing, and do it well.
+This is a thought experiment. A deliberate return to the Unix philosophy: do one thing, and do it well. The name comes from the [Planck length](https://en.wikipedia.org/wiki/Planck_length), the smallest meaningful scale in physics. PlanckClaw is the smallest meaningful AI agent we could build.
 
 The agent binary does no networking. It reads from a pipe, writes to a pipe, and persists state to files. It builds JSON payloads for the Claude API by hand (no JSON library, just `stosb` and careful quoting). It parses API responses with a structural JSON walker written in x86-64. It escapes strings, manages conversation history, triggers memory compaction when history grows too long, and writes responses back out. All of this in raw assembly, with raw `read`/`write`/`open`/`close` syscalls. No malloc. No printf. No libc at all. The binary is fully static and has zero runtime dependencies.
 
@@ -29,7 +44,7 @@ Everything else is composed around it:
 
 - `bridge_discord.sh` connects to the Discord Gateway via WebSocket, relays messages through FIFOs. ~180 lines of shell.
 - `bridge_llm.sh` takes JSON payloads from a FIFO, `curl`s the Anthropic API, writes responses back. ~85 lines of shell.
-- `plankclaw.sh` creates pipes, starts all three processes, cleans up on exit. ~75 lines of shell.
+- `planckclaw.sh` creates pipes, starts all three processes, cleans up on exit. ~75 lines of shell.
 
 The total codebase is ~2,200 lines. The compiled binary is 5,408 bytes. It runs in ~200KB of RAM (mostly BSS buffers). There is no build system beyond a 6-line Makefile. There are no dependencies beyond what's already on your Linux box (plus `websocat`).
 
@@ -61,7 +76,7 @@ The point is not that you should write your agents in assembly. The point is tha
 
 Three processes, four named pipes. The agent never touches the network. The bridges never touch the state. Clean separation.
 
-- **Agent** (`plankclaw`): the 5KB binary. Reads messages, builds API payloads, parses responses, persists history and memory. Written in x86-64 assembly. No networking.
+- **Agent** (`planckclaw`): the 5KB binary. Reads messages, builds API payloads, parses responses, persists history and memory. Written in x86-64 assembly. No networking.
 - **Bridge Discord** (`bridge_discord.sh`): connects to the Discord Gateway via WebSocket (`websocat`), relays user messages into `fifo_in`, sends agent responses from `fifo_out` to Discord via REST API.
 - **Bridge LLM** (`bridge_llm.sh`): reads JSON payloads from `fifo_llm_req`, sends them to the Anthropic Messages API via `curl`, writes responses to `fifo_llm_res`. Retries on failure.
 
@@ -84,7 +99,7 @@ Environment variables in `config.env`:
 | `DISCORD_BOT_TOKEN` | Discord bot token | (required) |
 | `DISCORD_CHANNEL_ID` | Channel to listen on | (required) |
 | `ANTHROPIC_API_KEY` | Anthropic API key | (required) |
-| `PLANKCLAW_DIR` | Memory directory | `./memory` |
+| `PLANCKCLAW_DIR` | Memory directory | `./memory` |
 | `HISTORY_MAX` | Lines before compaction | `200` |
 | `HISTORY_KEEP` | Lines kept after compaction | `40` |
 
@@ -110,10 +125,10 @@ You'll also need a [Discord bot token](https://discord.com/developers/applicatio
 ## files
 
 ```
-plankclaw/
-├── plankclaw.asm          # the agent, 1,800 lines of x86-64 NASM
+planckclaw/
+├── planckclaw.asm         # the agent, 1,800 lines of x86-64 NASM
 ├── Makefile               # nasm + ld → 5KB binary
-├── plankclaw.sh           # launcher, starts everything, cleans up on exit
+├── planckclaw.sh          # launcher, starts everything, cleans up on exit
 ├── bridge_discord.sh      # Discord ↔ FIFO bridge
 ├── bridge_llm.sh          # FIFO ↔ Anthropic API bridge
 ├── config.env.example     # config template

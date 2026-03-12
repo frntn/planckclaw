@@ -1,13 +1,13 @@
 ASM      = nasm
 LDFLAGS  = -s -n
-TARGET   = plankclaw
+TARGET   = planckclaw
 
 all: $(TARGET)
 
-$(TARGET): plankclaw.o
+$(TARGET): planckclaw.o
 	ld $(LDFLAGS) -o $@ $<
 
-plankclaw.o: plankclaw.asm
+planckclaw.o: planckclaw.asm
 	$(ASM) -f elf64 -o $@ $<
 
 size: $(TARGET)
@@ -15,6 +15,6 @@ size: $(TARGET)
 	size $(TARGET)
 
 clean:
-	rm -f plankclaw.o $(TARGET)
+	rm -f planckclaw.o $(TARGET)
 
 .PHONY: all size clean

@@ -1,10 +1,10 @@
 #!/bin/sh
-# bridge_llm.sh — LLM bridge for plankclaw
+# bridge_llm.sh — LLM bridge for planckclaw
 # Reads JSON payloads from fifo_llm_req, sends to Anthropic API, returns responses on fifo_llm_res.
 # Delimiter: double newline (\n\n)
 
-FIFO_REQ="/tmp/plankclaw/fifo_llm_req"
-FIFO_RES="/tmp/plankclaw/fifo_llm_res"
+FIFO_REQ="/tmp/planckclaw/fifo_llm_req"
+FIFO_RES="/tmp/planckclaw/fifo_llm_res"
 
 if [ -z "$ANTHROPIC_API_KEY" ]; then
     echo "bridge_llm: ANTHROPIC_API_KEY not set" >&2

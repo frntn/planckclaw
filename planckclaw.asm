@@ -1,4 +1,4 @@
-; plankclaw.asm — The smallest possible functional AI agent on Linux x86-64
+; planckclaw.asm — The smallest possible functional AI agent on Linux x86-64
 ; Reads messages from fifo_in, builds Claude API payloads, sends via fifo_llm,
 ; persists history, and writes responses to fifo_out.
 ; Assembled with NASM, linked with ld.
@@ -50,13 +50,13 @@ default rel
 section .data
 
 ; FIFO paths
-fifo_in_path:       db "/tmp/plankclaw/fifo_in", 0
-fifo_out_path:      db "/tmp/plankclaw/fifo_out", 0
-fifo_llm_req_path:  db "/tmp/plankclaw/fifo_llm_req", 0
-fifo_llm_res_path:  db "/tmp/plankclaw/fifo_llm_res", 0
+fifo_in_path:       db "/tmp/planckclaw/fifo_in", 0
+fifo_out_path:      db "/tmp/planckclaw/fifo_out", 0
+fifo_llm_req_path:  db "/tmp/planckclaw/fifo_llm_req", 0
+fifo_llm_res_path:  db "/tmp/planckclaw/fifo_llm_res", 0
 
 ; Env var names
-env_dir:            db "PLANKCLAW_DIR", 0
+env_dir:            db "PLANCKCLAW_DIR", 0
 env_hist_max:       db "HISTORY_MAX", 0
 env_hist_keep:      db "HISTORY_KEEP", 0
 
