@@ -12,14 +12,24 @@ else
     exit 1
 fi
 
+# Kill leftover processes from previous runs
+for pat in 'bridge_discord.sh' 'bridge_llm.sh' 'websocat.*plankclaw' 'sleep 86400'; do
+    pkill -f "$pat" 2>/dev/null || true
+done
+pkill -x plankclaw 2>/dev/null || true
+# Clean stale FIFOs
+rm -f /tmp/plankclaw/fifo_in /tmp/plankclaw/fifo_out \
+      /tmp/plankclaw/fifo_llm_req /tmp/plankclaw/fifo_llm_res \
+      /tmp/plankclaw/ws_send /tmp/plankclaw/ws_recv
+
 # Create FIFO directory and memory directory
 mkdir -p /tmp/plankclaw memory
 
-# Create FIFOs (ignore error if they already exist)
-mkfifo /tmp/plankclaw/fifo_in      2>/dev/null || true
-mkfifo /tmp/plankclaw/fifo_out     2>/dev/null || true
-mkfifo /tmp/plankclaw/fifo_llm_req 2>/dev/null || true
-mkfifo /tmp/plankclaw/fifo_llm_res 2>/dev/null || true
+# Create FIFOs
+mkfifo /tmp/plankclaw/fifo_in
+mkfifo /tmp/plankclaw/fifo_out
+mkfifo /tmp/plankclaw/fifo_llm_req
+mkfifo /tmp/plankclaw/fifo_llm_res
 
 # Ensure memory files exist
 [ -f memory/soul.md ]       || echo "You are a helpful personal assistant." > memory/soul.md
@@ -43,12 +53,18 @@ echo "plankclaw: agent started (PID $AGENT_PID)" >&2
 DISCORD_PID=$!
 echo "plankclaw: bridge_discord started (PID $DISCORD_PID)" >&2
 
-# Cleanup on exit
+# Cleanup on exit — kill all children recursively
 cleanup() {
+    trap '' EXIT INT TERM   # disable trap to prevent recursion
     echo "plankclaw: shutting down..." >&2
     kill $LLM_PID $AGENT_PID $DISCORD_PID 2>/dev/null
+    # Kill any remaining children (heartbeat, keepalive, websocat, etc.)
+    pkill -P $DISCORD_PID 2>/dev/null
+    pkill -P $$ 2>/dev/null
+    wait 2>/dev/null
     rm -f /tmp/plankclaw/fifo_in /tmp/plankclaw/fifo_out \
-          /tmp/plankclaw/fifo_llm_req /tmp/plankclaw/fifo_llm_res
+          /tmp/plankclaw/fifo_llm_req /tmp/plankclaw/fifo_llm_res \
+          /tmp/plankclaw/ws_send /tmp/plankclaw/ws_recv
     rmdir /tmp/plankclaw 2>/dev/null || true
     echo "plankclaw: stopped." >&2
 }
