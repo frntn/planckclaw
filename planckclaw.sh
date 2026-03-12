@@ -1,8 +1,18 @@
 #!/bin/sh
 # planckclaw.sh — Launcher for the planckclaw AI agent
-# Creates FIFOs, ensures memory files exist, starts all three processes.
+# Creates 6 FIFOs (3 bridge pairs), ensures memory files exist, starts all 4 processes.
+# Usage: ./planckclaw.sh [interact_bridge]
+#   interact_bridge: path to the interact bridge script (default: ./bridge_discord.sh)
+#   Example: ./planckclaw.sh ./bridge_cli.sh
 
 set -e
+
+INTERACT_BRIDGE="${1:-./bridge_discord.sh}"
+
+if [ ! -x "$INTERACT_BRIDGE" ]; then
+    echo "planckclaw: interact bridge '$INTERACT_BRIDGE' not found or not executable." >&2
+    exit 1
+fi
 
 # Load configuration
 if [ -f ./config.env ]; then
@@ -12,24 +22,32 @@ else
     exit 1
 fi
 
-# Kill leftover processes from previous runs
-for pat in 'bridge_discord.sh' 'bridge_llm.sh' 'websocat.*planckclaw' 'sleep 86400'; do
-    pkill -f "$pat" 2>/dev/null || true
+# Kill leftover processes from previous runs (exclude ourselves)
+for pat in 'bridge_discord.sh' 'bridge_cli.sh' 'bridge_brain.sh' 'bridge_claw.sh' 'websocat.*planckclaw' 'sleep 86400'; do
+    for pid in $(pgrep -f "$pat" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        kill "$pid" 2>/dev/null || true
+    done
 done
 pkill -x planckclaw 2>/dev/null || true
+
 # Clean stale FIFOs
-rm -f /tmp/planckclaw/fifo_in /tmp/planckclaw/fifo_out \
-      /tmp/planckclaw/fifo_llm_req /tmp/planckclaw/fifo_llm_res \
+rm -f /tmp/planckclaw/interact_in /tmp/planckclaw/interact_out \
+      /tmp/planckclaw/brain_in /tmp/planckclaw/brain_out \
+      /tmp/planckclaw/claw_in /tmp/planckclaw/claw_out \
       /tmp/planckclaw/ws_send /tmp/planckclaw/ws_recv
 
-# Create FIFO directory and memory directory
-mkdir -p /tmp/planckclaw memory
+# Secure FIFO directory — owner-only access (API keys transit in clear)
+umask 077
+mkdir -p /tmp/planckclaw memory claws
 
-# Create FIFOs
-mkfifo /tmp/planckclaw/fifo_in
-mkfifo /tmp/planckclaw/fifo_out
-mkfifo /tmp/planckclaw/fifo_llm_req
-mkfifo /tmp/planckclaw/fifo_llm_res
+# Create 6 FIFOs (3 bridge pairs)
+mkfifo /tmp/planckclaw/interact_in
+mkfifo /tmp/planckclaw/interact_out
+mkfifo /tmp/planckclaw/brain_in
+mkfifo /tmp/planckclaw/brain_out
+mkfifo /tmp/planckclaw/claw_in
+mkfifo /tmp/planckclaw/claw_out
 
 # Ensure memory files exist
 [ -f memory/soul.md ]       || echo "You are a helpful personal assistant." > memory/soul.md
@@ -38,32 +56,38 @@ mkfifo /tmp/planckclaw/fifo_llm_res
 
 echo "planckclaw: starting..." >&2
 
-# Start bridge_llm in background
-./bridge_llm.sh &
-LLM_PID=$!
-echo "planckclaw: bridge_llm started (PID $LLM_PID)" >&2
+# Save terminal stdin — POSIX redirects stdin to /dev/null for & processes
+exec 3<&0
 
-# Start the agent binary in background
+# Start bridges and agent
+./bridge_brain.sh &
+BRAIN_PID=$!
+echo "planckclaw: bridge_brain started (PID $BRAIN_PID)" >&2
+
+./bridge_claw.sh &
+CLAW_PID=$!
+echo "planckclaw: bridge_claw started (PID $CLAW_PID)" >&2
+
 ./planckclaw &
 AGENT_PID=$!
 echo "planckclaw: agent started (PID $AGENT_PID)" >&2
 
-# Start bridge_discord in background
-./bridge_discord.sh &
-DISCORD_PID=$!
-echo "planckclaw: bridge_discord started (PID $DISCORD_PID)" >&2
+echo "planckclaw: $(basename "$INTERACT_BRIDGE") starting..." >&2
+"$INTERACT_BRIDGE" <&3 &
+INTERACT_PID=$!
+exec 3<&-
 
 # Cleanup on exit — kill all children recursively
 cleanup() {
-    trap '' EXIT INT TERM   # disable trap to prevent recursion
+    trap '' EXIT INT TERM
     echo "planckclaw: shutting down..." >&2
-    kill $LLM_PID $AGENT_PID $DISCORD_PID 2>/dev/null
-    # Kill any remaining children (heartbeat, keepalive, websocat, etc.)
-    pkill -P $DISCORD_PID 2>/dev/null
+    kill $BRAIN_PID $CLAW_PID $AGENT_PID $INTERACT_PID 2>/dev/null
+    pkill -P $INTERACT_PID 2>/dev/null
     pkill -P $$ 2>/dev/null
     wait 2>/dev/null
-    rm -f /tmp/planckclaw/fifo_in /tmp/planckclaw/fifo_out \
-          /tmp/planckclaw/fifo_llm_req /tmp/planckclaw/fifo_llm_res \
+    rm -f /tmp/planckclaw/interact_in /tmp/planckclaw/interact_out \
+          /tmp/planckclaw/brain_in /tmp/planckclaw/brain_out \
+          /tmp/planckclaw/claw_in /tmp/planckclaw/claw_out \
           /tmp/planckclaw/ws_send /tmp/planckclaw/ws_recv
     rmdir /tmp/planckclaw 2>/dev/null || true
     echo "planckclaw: stopped." >&2
