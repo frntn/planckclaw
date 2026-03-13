@@ -98,6 +98,16 @@ But the extreme minimalism also opens real doors:
 
 None of this matters if the architecture is a dead end. But PlanckClaw's pipe-based design means the agent binary never changes: new tools, new bridges, new LLM providers are all shell scripts composed around a fixed core. The core stays under 8KB. Forever.
 
+### how it compares
+
+| Feature | OpenClaw 🤖 | NullClaw 🦀 | PicoClaw ⚡ | PlanckClaw 🤏 |
+|---|---|---|---|---|
+| Language | TypeScript / Node.js | Zig | Go | x86-64 Assembly |
+| Execution Style | Full Service (Ext. Deps) | Static Binary | Static Binary | Static Binary (no libc) |
+| Resource Usage | High (Full Runtime) | Near Zero (~1MB) | Ultra-Low (<10MB) | Near Zero (~200KB) |
+| Startup Speed | Seconds (~Node startup) | Instant (<2ms) | Fast | Instant (<1ms) |
+| Hardware Target | PC / Server / Cloud | Edge / Open ($5) Hardware | Embedded / IoT ($10) | Embedded / IoT ($1) |
+
 ## architecture
 
 ```
