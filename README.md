@@ -181,9 +181,25 @@ esac
 
 Make it executable (`chmod +x`) and you're done. The claw bridge scans `claws/*.sh` at each message using shell builtins (zero fork for discovery). No recompilation, no config file, no restart needed — hot-reload is built in.
 
-### limitations
+## limitations
 
-The default tools are deliberately minimal. PlanckClaw is a thought experiment, not a framework. But the architecture supports any tool (filesystem access, HTTP requests, command execution) by adding a claw file. The core stays under 8KB. Forever.
+**Fixed-size buffers**: no `malloc`, no `brk`, no `mmap`. All buffers are allocated in BSS at compile time. If a message or response exceeds its buffer, it is silently truncated (no crash, no error). In practice these limits cover most use cases, but they are real constraints worth knowing:
+
+| Buffer | Size | What it holds |
+|---|---|---|
+| User message | 4 KB | Incoming message from bridge |
+| API request | 64 KB | Full JSON payload sent to the LLM |
+| API response | 64 KB | Raw JSON response from the LLM |
+| Extracted response | 8 KB | Text content parsed from the response |
+| System prompt | 8 KB | `memory/soul.md` content |
+| Conversation history | 32 KB | `memory/history.jsonl` (tail) |
+| Tool result | 4 KB | Output from a single tool call |
+
+**Minimal default tools**: PlanckClaw ships with only `get_time` and `system_status`. The architecture supports any tool (filesystem access, HTTP requests, command execution) by adding a claw file, but out of the box it is deliberately minimal.
+
+**Linux only**: raw x86-64 syscalls, no portability layer. No macOS, no Windows, no ARM.
+
+**This is a thought experiment, not production-ready software.**
 
 ## memory
 
